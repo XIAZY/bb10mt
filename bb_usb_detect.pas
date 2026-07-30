@@ -1,6 +1,7 @@
 unit bb_usb_detect;
 
 {$mode objfpc}{$H+}
+{$modeswitch typehelpers}
 
 interface
 
@@ -41,8 +42,13 @@ begin
 end;
 
 function IsLinkLocalIPv6(const IP: string): boolean;
+var
+  CleanIP: string;
 begin
-  Result := (Length(IP) >= 4) and (LowerCase(Copy(IP, 1, 4)) = 'fe80');
+  CleanIP := IP;
+  if Pos('%', CleanIP) > 0 then
+    CleanIP := Copy(CleanIP, 1, Pos('%', CleanIP) - 1);
+  Result := (Length(CleanIP) >= 4) and SameText(Copy(CleanIP, 1, 4), 'fe80');
 end;
 
 // Calculate phone IP for IPv4 with proper subnet handling
@@ -64,8 +70,8 @@ begin
     MaskInt := 0;
     for i := 0 to 3 do
     begin
-      IPInt := (IPInt shl 8) + cardinal(StrToIntDef(IPParts[i], 0));
-      MaskInt := (MaskInt shl 8) + cardinal(StrToIntDef(MaskParts[i], 0));
+      IPInt := (IPInt shl 8) or cardinal(StrToIntDef(IPParts[i], 0));
+      MaskInt := (MaskInt shl 8) or cardinal(StrToIntDef(MaskParts[i], 0));
     end;
 
     NetBase := IPInt and MaskInt;
@@ -96,29 +102,36 @@ end;
 function IPv6PhoneIP(const IP: string): string;
 var
   Parts: TStringArray;
-  LastPart: string;
+  LastPart, CleanIP: string;
   LastValue, NewValue: integer;
 begin
   Result := '';
+  CleanIP := IP;
+
+  // Видалення Zone ID (% scope), якщо присутній
+  if Pos('%', CleanIP) > 0 then
+    CleanIP := Copy(CleanIP, 1, Pos('%', CleanIP) - 1);
+
   try
-    if Pos('::', IP) > 0 then
+    if Pos('::', CleanIP) > 0 then
       Exit; // Skip compressed IPv6 addresses for simplicity
 
-    Parts := SplitString(IP, ':');
+    Parts := SplitString(CleanIP, ':');
     if Length(Parts) < 8 then
       Exit;
 
     LastPart := Parts[High(Parts)];
     LastValue := StrToInt('$' + LastPart);
 
-    // Modify the interface identifier (last 64 bits)
     if LastValue > 1 then
       NewValue := LastValue - 1
     else
       NewValue := LastValue + 1;
 
     Parts[High(Parts)] := LowerCase(IntToHex(NewValue, Length(LastPart)));
-    Result.Join(':', Parts);
+
+    // Виправлення: Використання статичного виклику String.Join
+    Result := string.Join(':', Parts);
   except
     Result := '';
   end;
@@ -134,10 +147,7 @@ begin
   if (IfName = '') or (MAC = '') then Exit;
   if not (IsAPIPAAddress(IPv4) or IsLinkLocalIPv6(IPv6)) then Exit;
 
-  // Find existing interface or create new one
   Found := False;
-  Idx := 0;
-
   for Idx := 0 to High(Interfaces) do
   begin
     if Interfaces[Idx].Name = IfName then
@@ -259,17 +269,10 @@ begin
   Result := '';
   for i := 0 to 15 do
   begin
-    if i > 0 then
-    begin
-      if (i mod 2) = 0 then Result := Result + ':';
-    end;
+    if (i > 0) and ((i mod 2) = 0) then
+      Result := Result + ':';
     Result := Result + IntToHex(Addr[i], 2);
   end;
-  // Simple compression of consecutive zeros (basic implementation)
-  Result := StringReplace(Result, ':0000:', '::', [rfReplaceAll]);
-  Result := StringReplace(Result, ':000', ':', [rfReplaceAll]);
-  Result := StringReplace(Result, ':00', ':', [rfReplaceAll]);
-  Result := StringReplace(Result, ':0', ':', [rfReplaceAll]);
 end;
 {$ELSE}
 var
@@ -347,7 +350,6 @@ begin
     while ifa <> nil do
     begin
       try
-        // Only process UP interfaces
         if ((ifa^.ifa_flags and IFF_UP) <> 0) and Assigned(ifa^.ifa_name) then
         begin
           InterfaceName := string(ifa^.ifa_name);
@@ -388,7 +390,7 @@ begin
           ProcessInterface(Result, InterfaceName, MAC, IPv4Addr, IPv4Mask, IPv6Addr);
         end;
       except
-        // Skip problematic interfaces
+        // Ignore errors
       end;
 
       ifa := ifa^.ifa_next;
@@ -402,7 +404,6 @@ end;
 
 {$IFDEF WINDOWS}
 const
-  INET_ADDRSTRLEN = 16;
   INET6_ADDRSTRLEN = 46;
 
 function MACToString(Addr: PByte; Len: ULONG): string;
@@ -435,7 +436,6 @@ var
 begin
   SetLength(Result, 0);
 
-  // Initial buffer size
   BufferLength := 15000;
   GetMem(pAdapterAddresses, BufferLength);
 
@@ -448,7 +448,6 @@ begin
       @BufferLength
     );
 
-    // Retry with larger buffer if needed
     if RetVal = ERROR_BUFFER_OVERFLOW then
     begin
       FreeMem(pAdapterAddresses);
@@ -469,10 +468,8 @@ begin
     while pCurrentAdapter <> nil do
     begin
       try
-        // Only process operational interfaces
         if pCurrentAdapter^.OperStatus = IfOperStatusUp then
         begin
-          // Initialize interface record
           xInterface.Name := UTF8Encode(WideCharToString(pCurrentAdapter^.FriendlyName));
           xInterface.MAC := '';
           xInterface.IPv4 := '';
@@ -483,12 +480,10 @@ begin
           IPv4Addr := '';
           IPv6Addr := '';
 
-          // Get MAC address
           if pCurrentAdapter^.PhysicalAddressLength > 0 then
             xInterface.MAC := MACToString(@pCurrentAdapter^.PhysicalAddress[0],
-                                       pCurrentAdapter^.PhysicalAddressLength);
+                                         pCurrentAdapter^.PhysicalAddressLength);
 
-          // Process unicast addresses
           pUnicastAddress := pCurrentAdapter^.FirstUnicastAddress;
           while pUnicastAddress <> nil do
           begin
@@ -520,7 +515,6 @@ begin
             pUnicastAddress := pUnicastAddress^.Next;
           end;
 
-          // Process interface if it has valid addresses and MAC
           if HasValidAddress and (xInterface.MAC <> '') then
           begin
             ProcessInterface(Result, xInterface.Name, xInterface.MAC,
@@ -528,7 +522,7 @@ begin
           end;
         end;
       except
-        // Skip problematic adapters
+        // Ignore adapter-specific errors
       end;
 
       pCurrentAdapter := pCurrentAdapter^.Next;

@@ -22,14 +22,12 @@ const
   SSH_ACCEPTED = 5;
   COMPLETE = 6;
 
-
   CHALLENGE_ITEM_PIN = 1;
   CHALLENGE_ITEM_SESSIONKEY = 2;
   CHALLENGE_ITEM_BSN = 3;
   CHALLENGE_ITEM_PERMISSION = 4;
 
 type
-
   TMainNet = class;
 
   TSocketThread = class(TThread)
@@ -59,24 +57,27 @@ type
     FRestoring: boolean;
     FSSHKey: string;
     FLog: TLogManager;
+
     // Challenge response data
     FSessionKey: TBytes;
     FPrivKey: TRsaPrivateKey;
-    FHashedPassword: ansistring;
+    FHashedPassword: rawbytestring;
+
+    procedure LogMsg(const Msg: string);
     procedure AESEncryptSend(const Plain: TBytes; Code: word);
     procedure DoKeepAlive;
     procedure KeepAlive;
     procedure SocketLoop;
     procedure RequestConfigure;
     procedure RequestChallenge;
-    procedure ReplyChallenge(ServerChallenge: rawbytestring);
+    procedure ReplyChallenge(const ServerChallenge: rawbytestring);
     procedure RequestAuthenticate;
     procedure StartServices;
-    procedure Authorise(Data: TBytes);
+    procedure Authorise(const Data: TBytes);
     procedure SendSSHKey;
     procedure OnSocketConnect;
     procedure OnSocketDisconnect;
-    procedure OnSocketRead(Data: TBytes);
+    procedure OnSocketRead(const Data: TBytes; ASize: integer);
     procedure ProcessServerChallenge(const Data: TBytes);
   public
     constructor Create(Log: TLogManager = nil);
@@ -98,7 +99,7 @@ type
 
 implementation
 
-uses uCrypto, CLI.Console;       // Optional: Colored console output
+uses uCrypto;
 
   {------------------ TSocketThread ------------------}
 
@@ -164,11 +165,17 @@ begin
   inherited Destroy;
 end;
 
+procedure TMainNet.LogMsg(const Msg: string);
+begin
+  if Assigned(FLog) then
+    FLog.AddMessage(Msg);
+end;
+
 procedure TMainNet.Init;
 begin
   FState := 1;
   FConnState := CONNECTING;
-  FLog.AddMessage(Format('Connecting to target %s:4455', [ip]));
+  LogMsg(Format('Connecting to target %s:4455', [FIP]));
 
   FSocket.Connect(FIP, '4455');
   if FSocket.LastError = 0 then
@@ -178,7 +185,7 @@ begin
   end
   else
   begin
-    FLog.AddMessage('Connection failed: ' + FSocket.LastErrorDesc);
+    LogMsg('Connection failed: ' + FSocket.LastErrorDesc);
     FState := 0;
     FConnState := DISCONNECTED;
   end;
@@ -186,19 +193,22 @@ end;
 
 procedure TMainNet.EndConnection;
 begin
-  TargetClose;
   FState := 0;
   FConnState := DISCONNECTED;
+
+  // Спочатку закриваємо сокет, щоб розблокувати RecvBuffer / CanRead у потоці
+  if Assigned(FSocket) then
+  begin
+    TargetClose;
+    FSocket.CloseSocket;
+  end;
 
   if Assigned(FSocketThread) then
   begin
     FSocketThread.Terminate;
     FSocketThread.WaitFor;
-    FSocketThread.Free;
-    FSocketThread := nil;
+    FreeAndNil(FSocketThread);
   end;
-
-  FSocket.CloseSocket;
 end;
 
 procedure TMainNet.SocketLoop;
@@ -207,31 +217,34 @@ var
   BytesRead: integer;
 begin
   SetLength(Data, 4096);
-  while (FState > 0) and (not Assigned(FSocketThread) or not FSocketThread.Terminated) do
+  while (FState > 0) and Assigned(FSocketThread) and not FSocketThread.Terminated do
   begin
-    if FSocket.CanRead(1000) then
+    if FSocket.CanRead(200) then
     begin
       BytesRead := FSocket.RecvBuffer(@Data[0], Length(Data));
       if BytesRead > 0 then
+        OnSocketRead(Data, BytesRead)
+      else if FSocket.LastError <> 0 then
       begin
-        OnSocketRead(Data);
+        OnSocketDisconnect;
+        Break;
       end;
     end;
 
-    //DoKeepAlive;
+    DoKeepAlive;
     Sleep(10);
   end;
 end;
 
 procedure TMainNet.DoKeepAlive;
 var
-  Now: QWord;
+  NowTime: QWord;
 begin
-  Now := GetTickCount64();
-  if (FConnState >= COMPLETE) and ((Now - FLastKeepAlive) >= KEEPALIVE_INTERVAL) then
+  NowTime := GetTickCount64();
+  if (FConnState >= COMPLETE) and ((NowTime - FLastKeepAlive) >= KEEPALIVE_INTERVAL) then
   begin
     KeepAlive;
-    FLastKeepAlive := Now;
+    FLastKeepAlive := NowTime;
   end;
 end;
 
@@ -247,357 +260,318 @@ procedure TMainNet.OnSocketDisconnect;
 begin
   FState := 0;
   FConnState := DISCONNECTED;
+  LogMsg('Socket disconnected.');
 end;
-
 
 procedure TMainNet.SendSSHKey;
 var
-  keyLength: word;
-  packet: array of byte;
-  i: integer;
+  KeyLen: word;
+  Packet: TBytes;
 begin
-  FLog.AddMessage('Successfully authenticated with target credentials.');
-  FLog.AddMessage('Sending ssh key to target');
+  LogMsg('Successfully authenticated with target credentials.');
+  LogMsg('Sending SSH key to target');
 
-  // Construct packet with key length and key data
-  keyLength := Length(FSSHKey);
+  KeyLen := Length(FSSHKey);
+  if KeyLen = 0 then Exit;
 
-  // Create packet as byte array
-  SetLength(packet, 2 + Length(FSSHKey));
-  PWord(@packet[0])^ := NtoBE(word(Length(FSSHKey)));
-  move(FSSHKey[1], packet[2], Length(FSSHKey));
+  SetLength(Packet, 2 + KeyLen);
+  PWord(@Packet[0])^ := NtoBE(KeyLen);
+  Move(PChar(FSSHKey)^, Packet[2], KeyLen);
 
-  // Send buffer directly
-  AESEncryptSend(packet, 7);
+  AESEncryptSend(Packet, Ord(tcSendSSHKey));
 end;
 
 procedure TMainNet.ProcessServerChallenge(const Data: TBytes);
 var
-  EntireLength, Version, Code, SourceLength, SessionKeyLength, SessionKeyType,
-  ContainerLength, ContainerPrimitive, ContainerType, ExpectedSignatureLength, ExpectedSignatureType: word;
-  ContainerKeyVersion: cardinal;
-  SourceName, EncryptedBlob: TBytes;
+  SourceLength, ContainerLength: word;
+  EncryptedBlob: TBytes;
   ServerChallenge: rawbytestring;
   RSA: TRsa;
 begin
-  FLog.AddMessage(Format('Authenticating with target %s:4455', [FIP]));
+  LogMsg(Format('Authenticating with target %s:4455', [FIP]));
 
-  // Р§РёС‚Р°С”РјРѕ Р·Р°РіРѕР»РѕРІРєРё С‚Р° РЅРµРІРёРєРѕСЂРёСЃС‚РѕРІСѓРІР°РЅС– РїРѕР»СЏ
-  EntireLength := BEtoN(PWord(@Data[0])^);
-  Version := BEtoN(PWord(@Data[2])^);
-  Code := BEtoN(PWord(@Data[4])^);
+  if Length(Data) < 30 then Exit;
 
-  // РџСЂРѕРїСѓСЃРєР°С”РјРѕ 2 РЅРµРІС–РґРѕРјС– word
-  // SessionKeyLength := LEtoN(PWord(@Data[8])^);
-  // С‚РёРјС‡Р°СЃРѕРІРѕ РІРёРєРѕСЂРёСЃС‚Р°РЅРѕ РґР»СЏ РїСЂРѕРїСѓСЃРєСѓ
   SourceLength := LEtoN(PWord(@Data[10])^);
-  SessionKeyLength := LEtoN(PWord(@Data[12])^);
-  SessionKeyType := LEtoN(PWord(@Data[14])^);
   ContainerLength := LEtoN(PWord(@Data[16])^);
-  ContainerPrimitive := LEtoN(PWord(@Data[18])^);
-  ContainerType := LEtoN(PWord(@Data[20])^);
-  ExpectedSignatureLength := LEtoN(PWord(@Data[22])^);
-  ExpectedSignatureType := LEtoN(PWord(@Data[24])^);
-  ContainerKeyVersion := LEtoN(PCardinal(@Data[26])^);
 
-  // Р§РёС‚Р°С”РјРѕ sourceName
-  SetLength(SourceName, SourceLength);
-  if SourceLength > 0 then
-    Move(Data[30], SourceName[0], SourceLength);
+  if Length(Data) < (30 + SourceLength + ContainerLength) then
+  begin
+    LogMsg('Error: Invalid challenge payload length.');
+    Exit;
+  end;
 
-  // Р§РёС‚Р°С”РјРѕ encryptedBlob
   SetLength(EncryptedBlob, ContainerLength);
   if ContainerLength > 0 then
     Move(Data[30 + SourceLength], EncryptedBlob[0], ContainerLength);
 
-  // Р РѕР·С€РёС„СЂРѕРІСѓС”РјРѕ РїСЂРёРІР°С‚РЅРёРј РєР»СЋС‡РµРј
   RSA := TRsa.Create;
   try
     RSA.LoadFromPrivateKey(FPrivKey);
     ServerChallenge := RSA.Pkcs1Decrypt(@EncryptedBlob[0]);
   finally
-    FreeAndNil(RSA);
+    RSA.Free;
   end;
 
-  // Р’РёРєР»РёРє С„СѓРЅРєС†С–С— РѕР±СЂРѕР±РєРё РІС–РґРїРѕРІС–РґС–
-  replyChallenge(ServerChallenge);
+  ReplyChallenge(ServerChallenge);
 end;
 
-procedure TMainNet.OnSocketRead(Data: TBytes);
+procedure TMainNet.OnSocketRead(const Data: TBytes; ASize: integer);
 var
-  packetLength, version, code, len: word;
-  fcode: TTargetFeedback;
+  Code: word;
+  FCode: TTargetFeedback;
+  Len: word;
   Txt: string;
 begin
-  if Length(Data) >= 6 then
-  begin
-    packetLength := BEtoN(PWord(@Data[0])^);
-    version := BEtoN(PWord(@Data[2])^);
-    code := BEtoN(PWord(@Data[4])^);
+  if ASize < 6 then Exit;
 
-    case TTargetCode(code) of
-      tcFeedback: begin
-        fcode := TTargetFeedback(BEtoN(PWord(@Data[6])^));
-        len := BEtoN(PWord(@Data[8])^);
-        SetLength(txt, len);
-        if len > 0 then
-          move(Data[10], Txt[1], len);
-        if (fcode = tfResponseOK) then
+  Code := BEtoN(PWord(@Data[4])^);
+
+  case TTargetCode(Code) of
+    tcFeedback:
+    begin
+      if ASize < 10 then Exit;
+      FCode := TTargetFeedback(BEtoN(PWord(@Data[6])^));
+      Len := BEtoN(PWord(@Data[8])^);
+
+      if (Len > 0) and (ASize >= 10 + Len) then
+      begin
+        SetLength(Txt, Len);
+        Move(Data[10], PChar(Txt)^, Len);
+      end;
+
+      if (FCode = tfResponseOK) then
+      begin
+        if FConnState = CONNECTING then
         begin
-          if FConnState = CONNECTING then
+          RequestChallenge;
+          FConnState := NEGOTIATED;
+        end
+        else
+        begin
+          if FConnState > COMPLETE then Exit;
+          if FConnState <> COMPLETE then
           begin
-            RequestChallenge;
-            FConnState := NEGOTIATED;
-          end
-          else
-          begin
-            if FConnState > COMPLETE then Exit;
-            if FConnState <> COMPLETE then
-            begin
-              Inc(FConnState);
-              if FConnState = COMPLETE then
-                FLog.AddMessage(
-                  'Successfully connected. This application must remain running in order to use debug tools. Exiting the application will terminate this connection.');
-            end;
-            case FConnState of
-              AUTHORISED: RequestAuthenticate;
-              AUTHENTICATED: SendSSHKey;
-              SSH_ACCEPTED: begin
-                FLog.AddMessage('ssh key successfully transferred.');
-                StartServices;
-              end;
-              COMPLETE: KeepAlive;
-            end;
-
+            Inc(FConnState);
+            if FConnState = COMPLETE then
+              LogMsg('Successfully connected. Connection established.');
           end;
 
+          case FConnState of
+            AUTHORISED: RequestAuthenticate;
+            AUTHENTICATED: SendSSHKey;
+            SSH_ACCEPTED: begin
+              LogMsg('SSH key successfully transferred.');
+              StartServices;
+            end;
+            COMPLETE: KeepAlive;
+          end;
         end;
-
-      end;
-      tcEncryptedChallengeResponse: begin
-
-        ProcessServerChallenge(Data);
-      end;
-      tcAuthenticateChallengeResponse: begin
-        Authorise(Data);
       end;
     end;
+
+    tcEncryptedChallengeResponse:
+      ProcessServerChallenge(Data);
+
+    tcAuthenticateChallengeResponse:
+      Authorise(Data);
   end;
 end;
 
 procedure TMainNet.RequestConfigure;
 var
-  packet: array[0..5] of byte;
+  Packet: array[0..5] of byte;
 begin
-  PWord(@packet[0])^ := NtoBE(word(6));
-  PWord(@packet[2])^ := NtoBE(word(2));
-  PWord(@packet[4])^ := NtoBE(word(tcHello));
-  FSocket.SendBuffer(@packet[0], Length(packet));
+  PWord(@Packet[0])^ := NtoBE(word(6));
+  PWord(@Packet[2])^ := NtoBE(word(2));
+  PWord(@Packet[4])^ := NtoBE(word(tcHello));
+  FSocket.SendBuffer(@Packet[0], SizeOf(Packet));
 end;
 
 procedure TMainNet.RequestAuthenticate;
 var
-  packet: array[0..5] of byte;
+  Packet: array[0..5] of byte;
 begin
-  PWord(@packet[0])^ := NtoBE(word(6));
-  PWord(@packet[2])^ := NtoBE(word(2));
-  PWord(@packet[4])^ := NtoBE(word(tcAuthenticateChallengeRequest));
-  FSocket.SendBuffer(@packet[0], Length(packet));
+  PWord(@Packet[0])^ := NtoBE(word(6));
+  PWord(@Packet[2])^ := NtoBE(word(2));
+  PWord(@Packet[4])^ := NtoBE(word(tcAuthenticateChallengeRequest));
+  FSocket.SendBuffer(@Packet[0], SizeOf(Packet));
 end;
 
 procedure TMainNet.StartServices;
 var
-  packet: array[0..5] of byte;
+  Packet: array[0..5] of byte;
 begin
-  PWord(@packet[0])^ := NtoBE(word(6));
-  PWord(@packet[2])^ := NtoBE(word(2));
-  PWord(@packet[4])^ := NtoBE(word(tcStartServices));
-  FSocket.SendBuffer(@packet[0], Length(packet));
+  PWord(@Packet[0])^ := NtoBE(word(6));
+  PWord(@Packet[2])^ := NtoBE(word(2));
+  PWord(@Packet[4])^ := NtoBE(word(tcStartServices));
+  FSocket.SendBuffer(@Packet[0], SizeOf(Packet));
 end;
 
 procedure TMainNet.KeepAlive;
 var
-  packet: array[0..5] of byte;
+  Packet: array[0..5] of byte;
 begin
-  PWord(@packet[0])^ := NtoBE(word(6));
-  PWord(@packet[2])^ := NtoBE(word(2));
-  PWord(@packet[4])^ := NtoBE(word(tcKeepAlive));
-  FSocket.SendBuffer(@packet[0], Length(packet));
-  Sleep(1000);
+  PWord(@Packet[0])^ := NtoBE(word(6));
+  PWord(@Packet[2])^ := NtoBE(word(2));
+  PWord(@Packet[4])^ := NtoBE(word(tcKeepAlive));
+  FSocket.SendBuffer(@Packet[0], SizeOf(Packet));
 end;
 
 procedure TMainNet.TargetClose;
 var
-  packet: array[0..5] of byte;
+  Packet: array[0..5] of byte;
 begin
-  PWord(@packet[0])^ := NtoBE(word(6));
-  PWord(@packet[2])^ := NtoBE(word(2));
-  PWord(@packet[4])^ := NtoBE(word(tcClose));
-  FSocket.SendBuffer(@packet[0], Length(packet));
+  PWord(@Packet[0])^ := NtoBE(word(6));
+  PWord(@Packet[2])^ := NtoBE(word(2));
+  PWord(@Packet[4])^ := NtoBE(word(tcClose));
+  FSocket.SendBuffer(@Packet[0], SizeOf(Packet));
 end;
 
-{------------------------- RequestChallenge -------------------------}
 procedure TMainNet.RequestChallenge;
 var
-  Rsa: TRsa;
+  RSA: TRsa;
   PubKey: TRsaPublicKey;
   Packet: TBytes;
-  i: integer;
+  ModLen: integer;
 begin
-  // РЎС‚РІРѕСЂСЋС”РјРѕ С– РіРµРЅРµСЂСѓС”РјРѕ RSA 1024-Р±С–С‚РЅРёР№ РєР»СЋС‡
-  Rsa := TRsa.Create;
+  RSA := TRsa.Create;
   try
-    Rsa.Generate(1024); // Р°РЅР°Р»РѕРі RSA_generate_key_ex
+    RSA.Generate(1024);
+    PubKey := RSA.SavePublicKey;
+    ModLen := Length(PubKey.Modulus);
 
-    // Р—Р±РµСЂС–РіР°С”РјРѕ РїСѓР±Р»С–С‡РЅРёР№ РєР»СЋС‡ (ASN.1 DER Р°Р±Рѕ РЅР°С€ С„РѕСЂРјР°С‚)
-    PubKey := Rsa.SavePublicKey;
-
-    // РћС‚СЂРёРјСѓС”РјРѕ modulus (n) Сѓ big-endian
-    if Length(PubKey.Modulus) > 128 then
+    if ModLen > 128 then
       raise Exception.Create('Modulus > 128 bytes!');
 
-    // Р¤РѕСЂРјСѓС”РјРѕ РїР°РєРµС‚ (8 Р±Р°Р№С‚ Р·Р°РіРѕР»РѕРІРѕРє + 128 Р±Р°Р№С‚ modulus)
-    SetLength(Packet, 8 + Length(PubKey.Modulus));
-    PWord(@Packet[0])^ := NtoBE(word(8 + Length(PubKey.Modulus)));
+    SetLength(Packet, 8 + ModLen);
+    PWord(@Packet[0])^ := NtoBE(word(8 + ModLen));
     PWord(@Packet[2])^ := NtoBE(word(2));
-    PWord(@Packet[4])^ := NtoBE(word(3));
-    PWord(@Packet[6])^ := NtoBE(word(Length(PubKey.Modulus)));
+    PWord(@Packet[4])^ := NtoBE(word(tcStartRequest));
+    PWord(@Packet[6])^ := NtoBE(word(ModLen));
 
-    move(PubKey.Modulus[1], Packet[8], Length(PubKey.Modulus));
+    if ModLen > 0 then
+      Move(PubKey.Modulus[1], Packet[8], ModLen);
 
-    // Р’С–РґРїСЂР°РІР»СЏС”РјРѕ РїРѕ СЃРѕРєРµС‚Сѓ
     FSocket.SendBuffer(@Packet[0], Length(Packet));
-
-    // Р—Р±РµСЂС–РіР°С”РјРѕ РїСЂРёРІР°С‚РЅРёР№ РєР»СЋС‡ Сѓ РїРѕР»С– РєР»Р°СЃСѓ
-    Rsa.SavePrivateKey(FPrivKey); // РјРѕР¶РЅР° Сѓ PEM С‡Рё DER
+    RSA.SavePrivateKey(FPrivKey);
   finally
-    Rsa.Free;
+    RSA.Free;
   end;
 end;
 
-{------------------------- ReplyChallenge -------------------------}
-procedure TMainNet.ReplyChallenge(ServerChallenge: rawbytestring);
+procedure TMainNet.ReplyChallenge(const ServerChallenge: rawbytestring);
 
-  function getChallengeItem(itemId: byte): TBytes;
+  function GetChallengeItem(ItemId: byte): TBytes;
   var
-    len, _itemID: byte;
-    i, c: integer;
+    ItemLen, CurItemID: byte;
+    Idx, TotalLen: integer;
   begin
     SetLength(Result, 0);
-    i := 1;
-    c := Length(ServerChallenge);
-    len := 0;
-    _itemID := 0;
-    while i <= c do
+    Idx := 1;
+    TotalLen := Length(ServerChallenge);
+
+    while Idx <= TotalLen do
     begin
-      if len = 0 then
-        len := byte(ServerChallenge[i])
-      else if _itemID = 0 then
-        _itemID := byte(ServerChallenge[i])
-      else
+      ItemLen := byte(ServerChallenge[Idx]);
+      Inc(Idx);
+      if Idx > TotalLen then Break;
+
+      CurItemID := byte(ServerChallenge[Idx]);
+      Inc(Idx);
+
+      if CurItemID = ItemId then
       begin
-        if (_itemID = itemId) then
+        if (Idx + ItemLen - 1) <= (TotalLen + 1) then
         begin
-          SetLength(Result, len);
-          move(ServerChallenge[i], Result[0], len);
-          Exit;
+          SetLength(Result, ItemLen);
+          if ItemLen > 0 then
+            Move(ServerChallenge[Idx], Result[0], ItemLen);
         end;
-        Inc(i, len - 1);
-        len := 0;
-        _itemID := 0;
+        Exit;
       end;
-      Inc(i);
-
+      Inc(Idx, ItemLen);
     end;
-
   end;
 
 const
   QCONNDOOR_PERMISSIONS: array[0..4] of byte = (3, 4, 118, 131, 1);
-  EMSA_SHA1_HASH: array[0..14] of byte = (48, 33, 48, 9, 6, 5, 43, 14, 3, 2, 26, 5, 0, 4, 20);
+  EMSA_SHA1_HASH: array[0..14] of byte =
+    ($30, $21, $30, $09, $06, $05, $2B, $0E, $03, $02, $1A, $05, $00, $04, $14);
 var
-  decryptedBlob, HashBuf: TBytes;
-  Len: integer;
+  DecryptedBlob, HashBuf: TBytes;
   Plain: TBytes;
-  xSHA1: TSha1;
+  SHA1: TSha1;
   Digest: TSha1Digest;
-  Rsa: TRsa;
+  RSA: TRsa;
   Signature: rawbytestring;
 begin
-  // Build challenge buffer: serverChallenge + permissions
+  FSessionKey := GetChallengeItem(CHALLENGE_ITEM_SESSIONKEY);
 
-  FSessionKey := getChallengeItem(CHALLENGE_ITEM_SESSIONKEY);
+  SetLength(DecryptedBlob, 35);
+  if Length(ServerChallenge) >= 30 then
+    Move(ServerChallenge[1], DecryptedBlob[0], 30);
+  Move(QCONNDOOR_PERMISSIONS[0], DecryptedBlob[30], 5);
 
-  // Extract session key (bytes 8..23)
-  //Move(decryptedBlob[8], FSessionKey[0], 16);
+  SHA1.Init;
+  SHA1.Update(@DecryptedBlob[0], Length(DecryptedBlob));
+  SHA1.Final(Digest);
 
-  SetLength(decryptedBlob, 30 + 5);
-  Move(ServerChallenge[1], decryptedBlob[0], 30);
-  Move(QCONNDOOR_PERMISSIONS[0], decryptedBlob[30], 5);
-
-  // SHA1 hash
-  SetLength(HashBuf, 35);
+  SetLength(HashBuf, SizeOf(EMSA_SHA1_HASH) + SizeOf(Digest));
   Move(EMSA_SHA1_HASH[0], HashBuf[0], SizeOf(EMSA_SHA1_HASH));
+  Move(Digest[0], HashBuf[SizeOf(EMSA_SHA1_HASH)], SizeOf(Digest));
 
-  xSHA1.Init;
-  xSHA1.Update(@decryptedBlob[0], 35);
-  xSHA1.Final(Digest);
-  Move(Digest[0], HashBuf[SizeOf(EMSA_SHA1_HASH)], 20);
-  // RSA sign
-  Rsa := TRsa.Create;
+  RSA := TRsa.Create;
   try
-    Rsa.LoadFromPrivateKey(FPrivKey);
-    Signature := Rsa.Pkcs1Sign(@HashBuf[0], Length(HashBuf));
+    RSA.LoadFromPrivateKey(FPrivKey);
+    Signature := RSA.Pkcs1Sign(@HashBuf[0], Length(HashBuf));
   finally
-    Rsa.Free;
+    RSA.Free;
   end;
 
-  // Construct plain text
-  SetLength(Plain, 12 + Length(decryptedBlob) + Length(Signature));
-  PWord(@Plain[0])^ := NtoBE(word(4 + Length(decryptedBlob) + Length(Signature)));
-  PWord(@Plain[2])^ := NtoBE(word(Length(decryptedBlob)));
+  SetLength(Plain, 6 + Length(DecryptedBlob) + Length(Signature));
+  PWord(@Plain[0])^ := NtoBE(word(4 + Length(DecryptedBlob) + Length(Signature)));
+  PWord(@Plain[2])^ := NtoBE(word(Length(DecryptedBlob)));
   PWord(@Plain[4])^ := NtoBE(word(Length(Signature)));
 
-  Move(decryptedBlob[0], Plain[6], Length(decryptedBlob));
-  Move(Signature[1], Plain[6 + Length(decryptedBlob)], Length(Signature));
+  Move(DecryptedBlob[0], Plain[6], Length(DecryptedBlob));
+  if Length(Signature) > 0 then
+    Move(PChar(Signature)^, Plain[6 + Length(DecryptedBlob)], Length(Signature));
 
-  FLog.AddMessage('Authenticating with target credentials.');
-  AESEncryptSend(Plain, word(tcDecryptedChallengeResponse));
+  LogMsg('Authenticating with target credentials.');
+  AESEncryptSend(Plain, Ord(tcDecryptedChallengeResponse));
 end;
 
-{------------------------- AES Encrypt & Send -------------------------}
 procedure TMainNet.AESEncryptSend(const Plain: TBytes; Code: word);
 var
-  Encrypted: TBytes;
-  Packet, Header, FullPacket: TBytes;
+  Encrypted, Packet, Header, FullPacket: TBytes;
   TotalLen: integer;
   AES: TAesCbc;
   IV: TAesBlock;
-  OutLen: integer;
 begin
-  // Р“РµРЅРµСЂСѓС”РјРѕ IV 16 Р±Р°Р№С‚
-  AES := TAesCbc.Create(FSessionKey);
-  try
-    // РџС–РґРіРѕС‚РѕРІРєР° AES-128-CBC С€РёС„СЂСѓРІР°РЅРЅСЏ
-    RandomBytes(@AES.IV[0], SizeOf(IV));
-    move(AES.IV[0], IV[0], SizeOf(IV));
-    Encrypted := AES.EncryptPkcs7(Plain);
-  finally
-    FreeAndNil(AES);
+  if Length(FSessionKey) = 0 then
+  begin
+    LogMsg('Error: Missing Session Key for AES encryption.');
+    Exit;
   end;
 
-  // Р¤РѕСЂРјСѓС”РјРѕ РІРЅСѓС‚СЂС–С€РЅС–Р№ РїР°РєРµС‚: qint16(total) + qint16(plain len) + IV + encrypted
-  SetLength(Packet, 4 + 16 + Length(Encrypted));
-  Pword(@Packet[0])^ := NtoBE(word(Length(Encrypted)));
-  Pword(@Packet[2])^ := NtoBE(word(Length(Plain)));
-  Move(IV[0], Packet[4], 16);
-  Move(Encrypted[0], Packet[20], Length(Encrypted));
-  //Move(Encrypted[0], Packet[4], Length(Encrypted));
+  AES := TAesCbc.Create(FSessionKey);
+  try
+    RandomBytes(@IV[0], SizeOf(IV));
+    AES.IV := IV;
+    Encrypted := AES.EncryptPkcs7(Plain);
+  finally
+    AES.Free;
+  end;
 
-  // Р—Р°РіРѕР»РѕРІРѕРє РґР»СЏ СЃРѕРєРµС‚Р°
+  SetLength(Packet, 4 + SizeOf(IV) + Length(Encrypted));
+  PWord(@Packet[0])^ := NtoBE(word(Length(Encrypted)));
+  PWord(@Packet[2])^ := NtoBE(word(Length(Plain)));
+  Move(IV[0], Packet[4], SizeOf(IV));
+  if Length(Encrypted) > 0 then
+    Move(Encrypted[0], Packet[20], Length(Encrypted));
+
   SetLength(Header, 6);
-
-  // РћР±вЂ™С”РґРЅСѓС”РјРѕ Р·Р°РіРѕР»РѕРІРѕРє + РїР°РєРµС‚
   TotalLen := Length(Header) + Length(Packet);
   PWord(@Header[0])^ := NtoBE(word(TotalLen));
   PWord(@Header[2])^ := NtoBE(word(2));
@@ -607,42 +581,44 @@ begin
   Move(Header[0], FullPacket[0], Length(Header));
   Move(Packet[0], FullPacket[Length(Header)], Length(Packet));
 
-  // Р’С–РґРїСЂР°РІРєР°
   FSocket.SendBuffer(@FullPacket[0], Length(FullPacket));
 end;
 
-{------------------------- Authorise -------------------------}
-procedure TMainNet.Authorise(Data: TBytes);
+procedure TMainNet.Authorise(const Data: TBytes);
 var
   Plain: TBytes;
-
-  Algo, Iterations: integer;
-  SaltLength: smallint;
-  ChallengeLength: smallint;
-  Salt: TBytes;
-  Challenge: TBytes;
-  HashedData: TBytes;
+  Iterations: integer;
+  SaltLength, ChallengeLength: smallint;
+  Salt, Challenge, HashedData: TBytes;
+  HashStr: string;
 begin
+  if Length(Data) < 18 then Exit;
 
-  Algo := BEtoN(PInteger(@Data[6])^);
   Iterations := BEtoN(PInteger(@Data[10])^);
   SaltLength := BEtoN(PWord(@Data[14])^);
   ChallengeLength := BEtoN(PWord(@Data[16])^);
 
+  if Length(Data) < (18 + SaltLength + ChallengeLength) then Exit;
+
   SetLength(Salt, SaltLength);
   SetLength(Challenge, ChallengeLength);
 
-  move(Data[18], Salt[0], SaltLength);
-  move(Data[18 + SaltLength], Challenge[0], ChallengeLength);
+  if SaltLength > 0 then
+    Move(Data[18], Salt[0], SaltLength);
+  if ChallengeLength > 0 then
+    Move(Data[18 + SaltLength], Challenge[0], ChallengeLength);
 
   HashedData := HashPassV2(Challenge, Salt, FPassword, Iterations);
 
-  FHashedPassword := UpperCase(BytesToHex(HashedData));
+  HashStr := UpperCase(BytesToHex(HashedData));
+  FHashedPassword := rawbytestring(HashStr);
 
   SetLength(Plain, 2 + Length(FHashedPassword));
   PWord(@Plain[0])^ := NtoBE(word(Length(FHashedPassword)));
-  Move(FHashedPassword[1], Plain[2], Length(FHashedPassword));
-  AESEncryptSend(Plain, word(tcAuthenticate));
+  if Length(FHashedPassword) > 0 then
+    Move(PChar(FHashedPassword)^, Plain[2], Length(FHashedPassword));
+
+  AESEncryptSend(Plain, Ord(tcAuthenticate));
 end;
 
 end.

@@ -24,20 +24,37 @@ type
     unk4, unk5: DWord;
   end;
 
+procedure ClearDirectory(const Dir: string);
+var
+  FileInfo: TSearchRec;
+begin
+  if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*', faAnyFile, FileInfo) = 0 then
+  begin
+    try
+      repeat
+        if (FileInfo.Name <> '.') and (FileInfo.Name <> '..') then
+          DeleteFile(IncludeTrailingPathDelimiter(Dir) + FileInfo.Name);
+      until FindNext(FileInfo) <> 0;
+    finally
+      FindClose(FileInfo);
+    end;
+  end;
+end;
+
 procedure ExtractLoaders(const FileName, OutputDir: string);
 const
   PATTERN: array[0..3] of byte = ($04, $0B, $00, $04);
 var
-  InFile, OutFile: TFileStream;
+  InFile: TFileStream;
   Mem, CompressedData, DecompressedData: TMemoryStream;
   Loaders: array of TLoaderHdr2;
   SectionInfo: TImageSectionHeader;
-  ImageBase, VA, RAW, SectionStart, SectionEnd: DWord;
+  ImageBase: QWord;
+  VA, RAW, SectionStart, SectionEnd: DWord;
   SearchPos, SearchSize, Count, dscPos: DWord;
   i, j, k: integer;
   OutputFileName, ResultDir: string;
   DataPtr: pbyte;
-  SearchRec: TRawbyteSearchRec;
 begin
   // Визначаємо директорію результатів
   if OutputDir <> '' then
@@ -53,7 +70,7 @@ begin
 
   Mem := TMemoryStream.Create;
   try
-    InFile := TFileStream.Create(FileName, fmOpenRead);
+    InFile := TFileStream.Create(FileName, fmOpenRead or fmShareDenyWrite);
     try
       Mem.CopyFrom(InFile, InFile.Size);
     finally
@@ -74,20 +91,21 @@ begin
     dscPos := 0;
     DataPtr := pbyte(Mem.Memory) + SearchPos;
 
-    // Пошук патерну
+    // Пошук патерну з перевіркою безпеки меж пам'яті
     for i := 0 to integer(SearchSize) - 12 do
     begin
-      if CompareMem(DataPtr + i, @PATTERN[0], 4) then
+      if CompareMem(DataPtr + i, @PATTERN[0], SizeOf(PATTERN)) then
       begin
-        // Перевіряємо контекст
-        if PDWord(DataPtr + i - 4)^ = $00070000 then
+        // Перевіряємо контекст (з безпечною перевіркою від'ємного зсуву)
+        if (i >= 4) and (PDWord(DataPtr + i - 4)^ = $00070000) then
         begin
           dscPos := SearchPos + DWord(i);
-          Count := PDWord(DataPtr + i - 8)^;
+          if i >= 8 then
+            Count := PDWord(DataPtr + i - 8)^;
           Break;
         end;
 
-        if (PDWord(DataPtr + i - 8)^ = $00070000) and (PDWord(DataPtr + i - 4)^ = 0) then
+        if (i >= 12) and (PDWord(DataPtr + i - 8)^ = $00070000) and (PDWord(DataPtr + i - 4)^ = 0) then
         begin
           dscPos := SearchPos + DWord(i);
           Count := PDWord(DataPtr + i - 12)^;
@@ -106,70 +124,60 @@ begin
     TConsole.WriteLn(Format('Results will be saved into: %s', [ResultDir]));
 
     SetLength(Loaders, Count);
-    Mem.Seek(dscPos, soFromBeginning);
-    Mem.Read(Loaders[0], Count * SizeOf(TLoaderHdr2));
+    Mem.Position := dscPos;
+    Mem.ReadBuffer(Loaders[0], Count * SizeOf(TLoaderHdr2));
 
-    // Створюємо директорію для результатів
+    // Створюємо або очищуємо директорію для результатів
     if not DirectoryExists(ResultDir) then
       ForceDirectories(ResultDir)
     else
-    begin
-      // Очищуємо директорію
-      if FindFirst(ResultDir + DirectorySeparator + '*', faAnyFile, SearchRec) = 0 then
+      ClearDirectory(ResultDir);
+
+    // Оптимізація: Виносимо об'єкти потоків за межі циклу
+    CompressedData := TMemoryStream.Create;
+    DecompressedData := TMemoryStream.Create;
+    try
+      for i := 0 to Count - 1 do
       begin
-        repeat
-          if (SearchRec.Name <> '.') and (SearchRec.Name <> '..') then
-            DeleteFile(ResultDir + DirectorySeparator + SearchRec.Name);
-        until FindNext(SearchRec) <> 0;
-        FindClose(SearchRec);
-      end;
-    end;
+        if (Loaders[i].loaderPtr >= SectionStart) and (Loaders[i].loaderPtr < SectionEnd) then
+        begin
+          TConsole.WriteLn(Format('%.3d [%.8X] %.8X:%.8X-%.8X *',
+            [i, Loaders[i].loaderPtr, Loaders[i].deviceID, Loaders[i].RAMstart, Loaders[i].RAMend]));
 
-    for i := 0 to Count - 1 do
-    begin
-      if (Loaders[i].loaderPtr >= SectionStart) and (Loaders[i].loaderPtr < SectionEnd) then
-      begin
-        WriteLn(Format('%.3d [%.8x] %.8x:%.8x-%.8x *', [i, int64(Loaders[i].loaderPtr),
-          int64(Loaders[i].deviceID), int64(Loaders[i].RAMstart), int64(Loaders[i].RAMend)]));
+          // Генеруємо унікальне ім'я файлу
+          j := 0;
+          repeat
+            OutputFileName := Format('%s%sloader_%.8X-%.2d.bin',
+              [ResultDir, DirectorySeparator, Loaders[i].deviceID, j]);
+            Inc(j);
+          until not FileExists(OutputFileName);
 
-        // Генеруємо унікальне ім'я файлу
-        j := 0;
-        repeat
-          OutputFileName := Format('%s%sloader_%.8X-%.2d.bin', [ResultDir,
-            DirectorySeparator, int64(Loaders[i].deviceID), j]);
-          Inc(j);
-        until not FileExists(OutputFileName);
+          // Витягуємо і розпаковуємо дані
+          k := Loaders[i].loaderPtr + RAW - VA;
+          Mem.Position := k;
 
-        // Витягуємо і розпаковуємо дані
-        k := Loaders[i].loaderPtr + RAW - VA;
-        Mem.Seek(k, soFromBeginning);
+          CompressedData.Clear;
+          DecompressedData.Clear;
 
-        CompressedData := TMemoryStream.Create;
-        DecompressedData := TMemoryStream.Create;
-        try
           CompressedData.CopyFrom(Mem, Min(1024 * 1024, Mem.Size - k));
+          CompressedData.Position := 0;
+
           if unzipStream(CompressedData, DecompressedData) then
           begin
-            OutFile := TFileStream.Create(OutputFileName, fmCreate);
-            try
-              DecompressedData.Position := 0;
-              OutFile.CopyFrom(DecompressedData, DecompressedData.Size);
-              TConsole.WriteLn(Format('  Saved: %s (%d bytes)',
-                [ExtractFileName(OutputFileName), DecompressedData.Size]));
-            finally
-              OutFile.Free;
-            end;
+            DecompressedData.SaveToFile(OutputFileName);
+            TConsole.WriteLn(Format('  Saved: %s (%d bytes)',
+              [ExtractFileName(OutputFileName), DecompressedData.Size]));
           end
           else
             TConsole.WriteLn('  Unpack error', ccRed);
-        finally
-          DecompressedData.Free;
-          CompressedData.Free;
-        end;
-      end
-      else
-        WriteLn(Format('%.3d [%.8x] %.8x:%.8x-%.8x', [i, int64(Loaders[i].loaderPtr),
-          int64(Loaders[i].deviceID), int64(Loaders[i].RAMstart), int64(Loaders[i].RAMend)]));
+        end
+        else
+          TConsole.WriteLn(Format('%.3d [%.8X] %.8X:%.8X-%.8X',
+            [i, Loaders[i].loaderPtr, Loaders[i].deviceID, Loaders[i].RAMstart, Loaders[i].RAMend]));
+      end;
+    finally
+      DecompressedData.Free;
+      CompressedData.Free;
     end;
 
     TConsole.WriteLn(Format('Finished. Extracted: %d loaders', [Count]));

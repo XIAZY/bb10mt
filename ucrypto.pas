@@ -8,8 +8,7 @@ uses
   Classes, SysUtils, mormot.crypt.core;
 
 function BytesToHex(const Data: TBytes): string;
-function HashPassV2(const Challenge, Salt: TBytes; const password: string; Iterations: integer): TBytes;
-
+function HashPassV2(const Challenge, Salt: TBytes; const Password: string; Iterations: integer): TBytes;
 
 function SHA256OfStream(AStream: TStream): TSha256Digest;
 function SHA256OfStreamHex(AStream: TStream): string;
@@ -20,36 +19,31 @@ function SHA512OfStreamHex(AStream: TStream): string;
 function Base64UrlEncode(const S: string): string;
 function Base64UrlDecode(const S: string): string;
 
-
 type
   TRsaBlockType = (btEncryption = 2, btSignature = 1);
 
 function Pkcs1PadBytes(const Msg: TBytes; KeyLen: integer; BlockType: TRsaBlockType): TBytes;
 function Pkcs1UnPadBytes(const Encoded: TBytes; BlockType: TRsaBlockType; out Decoded: TBytes): boolean;
 
-function PKCS7UnPad(const Data: TBytes; BlockSize: integer): TBytes;
 function PKCS7Pad(const Data: TBytes; BlockSize: integer): TBytes;
+function PKCS7UnPad(const Data: TBytes; BlockSize: integer): TBytes;
 
 implementation
 
 uses ecdsa_p521, base64;
 
 function BytesToHex(const Data: TBytes): string;
-var
-  i: integer;
 begin
-  Result := '';
-  for i := 0 to Length(Data) - 1 do
-    Result := Result + IntToHex(Data[i], 2);
+  if Length(Data) = 0 then Exit('');
+  SetLength(Result, Length(Data) * 2);
+  BinToHex(pansichar(@Data[0]), PChar(Pointer(Result)), Length(Data));
 end;
-
 
 function SHA256OfStream(AStream: TStream): TSha256Digest;
 var
   xSHA256: TSha256;
   Buffer: array[0..8191] of byte;
   ReadBytes: integer;
-  I: integer;
 begin
   xSHA256.Init;
   AStream.Position := 0;
@@ -61,25 +55,21 @@ begin
   xSHA256.Final(Result);
 end;
 
-
 function SHA256OfStreamHex(AStream: TStream): string;
 var
   Digest: TSHA256Digest;
-  I: integer;
 begin
   Digest := SHA256OfStream(AStream);
-  Result := '';
-  for I := 0 to High(Digest) do
-    Result := Result + LowerCase(IntToHex(Digest[I], 2));
+  SetLength(Result, SizeOf(Digest) * 2);
+  BinToHex(pansichar(@Digest[0]), PChar(Pointer(Result)), SizeOf(Digest));
+  Result := LowerCase(Result);
 end;
-
 
 function SHA512OfStream(AStream: TStream): TSha512Digest;
 var
   xSHA512: TSha512;
   Buffer: array[0..8191] of byte;
   ReadBytes: integer;
-  I: integer;
 begin
   xSHA512.Init;
   AStream.Position := 0;
@@ -91,20 +81,17 @@ begin
   xSHA512.Final(Result);
 end;
 
-
 function SHA512OfStreamHex(AStream: TStream): string;
 var
   Digest: TSHA512Digest;
-  I: integer;
 begin
   Digest := SHA512OfStream(AStream);
-  Result := '';
-  for I := 0 to High(Digest) do
-    Result := Result + LowerCase(IntToHex(Digest[I], 2));
+  SetLength(Result, SizeOf(Digest) * 2);
+  BinToHex(pansichar(@Digest[0]), PChar(Pointer(Result)), SizeOf(Digest));
+  Result := LowerCase(Result);
 end;
 
-
-function HashPassV2(const Challenge, Salt: TBytes; const password: string; Iterations: integer): TBytes;
+function HashPassV2(const Challenge, Salt: TBytes; const Password: string; Iterations: integer): TBytes;
 var
   HashedData: TBytes;
   Count: integer;
@@ -123,7 +110,6 @@ begin
 
   repeat
     SetLength(Buf, 4 + Length(Salt) + Length(HashedData));
-    Offset := 0;
 
     Buf[0] := Count and $FF;
     Buf[1] := (Count shr 8) and $FF;
@@ -137,23 +123,21 @@ begin
       Inc(Offset, Length(Salt));
     end;
 
-
     if Length(HashedData) > 0 then
       Move(HashedData[0], Buf[Offset], Length(HashedData));
 
     if Count = 0 then
       SetLength(HashedData, 64);
 
-    xSHA512.Full(@Buf[0], length(Buf), Digest);
+    xSHA512.Full(@Buf[0], Length(Buf), Digest);
     if Length(HashedData) < SizeOf(Digest) then
       SetLength(HashedData, SizeOf(Digest));
-    move(Digest, HashedData[0], SizeOf(Digest));
+    Move(Digest, HashedData[0], SizeOf(Digest));
 
     if (Count = Iterations - 1) and Challenger then
     begin
       Count := -1;
       Challenger := False;
-      // Prepend challenge to hashedData
       if Length(Challenge) > 0 then
       begin
         SetLength(Buf, Length(Challenge) + Length(HashedData));
@@ -170,29 +154,46 @@ begin
   Result := HashedData;
 end;
 
-
 function Base64UrlEncode(const S: string): string;
+var
+  i, Len: integer;
 begin
   Result := EncodeStringBase64(S);
-  // Замінюємо символи для URL-safe
-  Result := StringReplace(Result, '+', '-', [rfReplaceAll]);
-  Result := StringReplace(Result, '/', '_', [rfReplaceAll]);
-  // Видаляємо '='
-  while (Length(Result) > 0) and (Result[Length(Result)] = '=') do
-    SetLength(Result, Length(Result) - 1);
+  Len := Length(Result);
+
+  // Швидке обрізання символiв '='
+  while (Len > 0) and (Result[Len] = '=') do
+    Dec(Len);
+  SetLength(Result, Len);
+
+  // Заміна за один прохід без створення додаткових рядків
+  for i := 1 to Len do
+  begin
+    if Result[i] = '+' then
+      Result[i] := '-'
+    else if Result[i] = '/' then
+      Result[i] := '_';
+  end;
 end;
 
 function Base64UrlDecode(const S: string): string;
 var
   B64: string;
+  i, PadLen: integer;
 begin
   B64 := S;
-  // Відновлюємо символи
-  B64 := StringReplace(B64, '-', '+', [rfReplaceAll]);
-  B64 := StringReplace(B64, '_', '/', [rfReplaceAll]);
-  // Відновлюємо '=' для кратності 4
-  while (Length(B64) mod 4) <> 0 do
-    B64 := B64 + '=';
+  for i := 1 to Length(B64) do
+  begin
+    if B64[i] = '-' then
+      B64[i] := '+'
+    else if B64[i] = '_' then
+      B64[i] := '/';
+  end;
+
+  PadLen := (4 - (Length(B64) mod 4)) mod 4;
+  if PadLen > 0 then
+    B64 := B64 + StringOfChar('=', PadLen);
+
   Result := DecodeStringBase64(B64);
 end;
 
@@ -203,6 +204,7 @@ end;
 function Pkcs1PadBytes(const Msg: TBytes; KeyLen: integer; BlockType: TRsaBlockType): TBytes;
 var
   PSLen, i: integer;
+  R: byte;
 begin
   if KeyLen < Length(Msg) + 11 then
     raise Exception.Create('Message too long for RSA key size');
@@ -218,17 +220,20 @@ begin
 
   case BlockType of
     btSignature:
-      for i := 0 to PSLen - 1 do
-        Result[2 + i] := $FF;
+      FillChar(Result[2], PSLen, $FF);
     btEncryption:
       for i := 0 to PSLen - 1 do
+      begin
         repeat
-          Result[2 + i] := byte(Random(255) + 1); // 1..255
-        until Result[2 + i] <> 0;
+          R := byte(Random(256));
+        until R <> 0;
+        Result[2 + i] := R;
+      end;
   end;
 
-  Result[2 + PSLen] := 0; // роздільник
-  Move(Msg[0], Result[3 + PSLen], Length(Msg));
+  Result[2 + PSLen] := 0; // Роздільник
+  if Length(Msg) > 0 then
+    Move(Msg[0], Result[3 + PSLen], Length(Msg));
 end;
 
 {===========================================================
@@ -242,8 +247,7 @@ begin
   Decoded := nil;
   Result := False;
 
-  if Length(Encoded) < 11 then Exit; // мінімальна довжина
-
+  if Length(Encoded) < 11 then Exit;
   if Encoded[0] <> 0 then Exit;
 
   case BlockType of
@@ -269,48 +273,49 @@ begin
 
   if (i >= Length(Encoded)) or (Encoded[i] <> 0) then Exit;
 
-  Inc(i); // початок повідомлення
+  Inc(i); // Початок повідомлення
   MsgStart := i;
   SetLength(Decoded, Length(Encoded) - MsgStart);
-  Move(Encoded[MsgStart], Decoded[0], Length(Encoded) - MsgStart);
+  if Length(Decoded) > 0 then
+    Move(Encoded[MsgStart], Decoded[0], Length(Decoded));
 
   Result := True;
 end;
 
-
 function PKCS7Pad(const Data: TBytes; BlockSize: integer): TBytes;
 var
-  PadLen, i: integer;
+  PadLen, DataLen: integer;
 begin
-  PadLen := BlockSize - (Length(Data) mod BlockSize);
-  if PadLen = 0 then
-    PadLen := BlockSize; // повний блок padding, якщо вже кратне
+  DataLen := Length(Data);
+  PadLen := BlockSize - (DataLen mod BlockSize);
 
-  SetLength(Result, Length(Data) + PadLen);
-  Move(Data[0], Result[0], Length(Data));
-  for i := Length(Data) to Length(Result) - 1 do
-    Result[i] := byte(PadLen);
+  SetLength(Result, DataLen + PadLen);
+  if DataLen > 0 then
+    Move(Data[0], Result[0], DataLen);
+
+  FillChar(Result[DataLen], PadLen, byte(PadLen));
 end;
 
 function PKCS7UnPad(const Data: TBytes; BlockSize: integer): TBytes;
 var
-  PadLen, i: integer;
+  PadLen, DataLen, i: integer;
 begin
-  if (Length(Data) = 0) or (Length(Data) mod BlockSize <> 0) then
+  DataLen := Length(Data);
+  if (DataLen = 0) or (DataLen mod BlockSize <> 0) then
     raise Exception.Create('Invalid padded data length');
 
-  PadLen := Data[High(Data)];
+  PadLen := Data[DataLen - 1];
   if (PadLen < 1) or (PadLen > BlockSize) then
     raise Exception.Create('Invalid PKCS#7 padding');
 
   // Перевірка усіх байт padding
-  for i := Length(Data) - PadLen to Length(Data) - 1 do
+  for i := DataLen - PadLen to DataLen - 1 do
     if Data[i] <> PadLen then
       raise Exception.Create('Invalid PKCS#7 padding bytes');
 
-  SetLength(Result, Length(Data) - PadLen);
-  Move(Data[0], Result[0], Length(Result));
+  SetLength(Result, DataLen - PadLen);
+  if Length(Result) > 0 then
+    Move(Data[0], Result[0], Length(Result));
 end;
-
 
 end.

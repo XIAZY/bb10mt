@@ -65,11 +65,9 @@ type
 
   TRCFSdir = array of rcfs_inode;
 
-  // Hash map for fast inode lookup
-  TInodeHashMap = record
-    Keys: array of string;
-    Values: array of dword;
-    Count: integer;
+  TInodeCacheEntry = record
+    Offset: dword;
+    Value: string;
   end;
 
   TRCFS = class
@@ -79,14 +77,10 @@ type
     fSuperblock: rcfs_superblock;
     fVerifierInode: rcfs_inode;
     fVerData: array of verifier_item;
-    fVerifierMap: TInodeHashMap;
-    fStringCache: array of record
-      Offset: dword;
-      Value: string;
-      end;
+    fStringCache: array of TInodeCacheEntry;
     fStringCacheCount: integer;
 
-    // Reusable buffers to reduce allocations
+    // Reusable buffers
     fWorkBuffer: array of byte;
     fDecompBuffer: array of byte;
     fTempBuffer: array of byte;
@@ -95,16 +89,11 @@ type
     procedure Open;
     procedure InitializeBuffers;
 
-    // Centralized compression functions
     function WriteStreamToFile(inStream: TStream; var inode: rcfs_inode; out hash: TSha256Digest): integer;
-
     function ReadFileData(inode: rcfs_inode): TBytes;
-
     function GetCachedString(off: dword): string;
-
     procedure AddStringToCache(off: dword; const Value: string);
-    procedure BuildVerifierMap;
-    function FastVerifierLookup(inode: dword): integer; inline;
+    function FastVerifierLookup(inodeIdx: dword): integer; inline;
     function GetPackedSize(inode: rcfs_inode): cardinal;
   public
     constructor Create(Stream: TStream);
@@ -118,9 +107,9 @@ type
 
     function inodeByOffset(off: dword): dword; inline;
     function getInodeByPath(const Path: string; var inode: rcfs_inode): dword;
-    function update_verifier(inode, packed_size: dword; const hash: TSha256Digest): integer;
+    function update_verifier(inodeIdx, packed_size: dword; const hash: TSha256Digest): integer;
     function GetInode(idx: dword): rcfs_inode; inline;
-    procedure SetInode(idx: dword; aValue: rcfs_inode);
+    procedure SetInode(idx: dword; const aValue: rcfs_inode);
     function chmod(const dst: string; mode: integer): integer;
     function chown(const dst: string; GID, UID: integer): integer;
     function ReadDir(off, size: dword; var DI: TRCFSdir): integer;
@@ -136,34 +125,41 @@ uses Math, uCrypto, uLZO2;
 const
   LZO_CHUNK_SIZE = $4000;
   MAX_NAME_LEN = 1024;
-  STRING_CACHE_SIZE = 5120000;
+  STRING_CACHE_INITIAL_SIZE = 16384;
 
   _LZO = (1 shl 7);
   _UCL = (1 shl 7) or (1 shl 6);
   _GZ = (1 shl 6);
 
+  { File types }
+  S_IFMT = 61440;
+  S_IFIFO = 4096;
+  S_IFCHR = 8192;
+  S_IFDIR = 16384;
+  S_IFBLK = 24576;
+  S_IFREG = 32768;
+  S_IFLNK = 40960;
+  S_IFSOCK = 49152;
 
 constructor TRCFS.Create(Stream: TStream);
 begin
+  inherited Create;
   fStream := Stream;
   fStringCacheCount := 0;
-  SetLength(fStringCache, STRING_CACHE_SIZE);
+  SetLength(fStringCache, STRING_CACHE_INITIAL_SIZE);
 
   InitializeBuffers;
   Open;
-  BuildVerifierMap;
 end;
 
 destructor TRCFS.Destroy;
 begin
-  // Cleanup buffers
   SetLength(fWorkBuffer, 0);
   SetLength(fDecompBuffer, 0);
   SetLength(fTempBuffer, 0);
   SetLength(fTempBufferX, 0);
   SetLength(fStringCache, 0);
-  SetLength(fVerifierMap.Keys, 0);
-  SetLength(fVerifierMap.Values, 0);
+  SetLength(fVerData, 0);
   inherited Destroy;
 end;
 
@@ -175,84 +171,50 @@ begin
   SetLength(fTempBufferX, MAX_NAME_LEN);
 end;
 
-procedure TRCFS.BuildVerifierMap;
+function TRCFS.FastVerifierLookup(inodeIdx: dword): integer;
 var
   i: integer;
 begin
-  fVerifierMap.Count := Length(fVerData);
-  SetLength(fVerifierMap.Keys, fVerifierMap.Count);
-  SetLength(fVerifierMap.Values, fVerifierMap.Count);
-
   for i := 0 to High(fVerData) do
   begin
-    fVerifierMap.Keys[i] := IntToStr(fVerData[i].inode);
-    fVerifierMap.Values[i] := i;
+    if fVerData[i].inode = inodeIdx then
+      Exit(i);
   end;
-end;
-
-function TRCFS.FastVerifierLookup(inode: dword): integer;
-var
-  key: string;
-  i: integer;
-begin
   Result := -1;
-  key := IntToStr(inode);
-
-  for i := 0 to fVerifierMap.Count - 1 do
-  begin
-    if fVerifierMap.Keys[i] = key then
-    begin
-      Result := fVerifierMap.Values[i];
-      Exit;
-    end;
-  end;
 end;
 
 function TRCFS.GetCachedString(off: dword): string;
 var
   i: integer;
+  bytesRead: integer;
 begin
-  // Check cache first
   for i := 0 to fStringCacheCount - 1 do
   begin
     if fStringCache[i].Offset = off then
-    begin
-      Result := fStringCache[i].Value;
-      Exit;
-    end;
+      Exit(fStringCache[i].Value);
   end;
 
-  // Not in cache, read from stream
-  Result := '';
-  if fStringCacheCount < STRING_CACHE_SIZE then
-  begin
-    fStream.Position := off;
-    if fStream.Size - fStream.Position >= MAX_NAME_LEN then
-      fStream.ReadBuffer(fTempBufferX[0], MAX_NAME_LEN)
-    else
-      fStream.ReadBuffer(fTempBufferX[0], fStream.Size - fStream.Position);
+  if off >= fStream.Size then Exit('');
 
-    Result := PChar(@fTempBufferX[0]);
-    AddStringToCache(off, Result);
-  end
-  else
-  begin
-    fStream.Position := off;
-    fStream.ReadBuffer(fTempBufferX[0], Min(MAX_NAME_LEN, fStream.Size - fStream.Position));
-    Result := PChar(@fTempBufferX[0]);
-  end;
+  fStream.Position := off;
+  bytesRead := fStream.Read(fTempBufferX[0], Min(MAX_NAME_LEN - 1, fStream.Size - off));
+  if bytesRead <= 0 then Exit('');
+
+  fTempBufferX[bytesRead] := 0; // Гарантуємо NULL-термінатор
+  Result := pansichar(@fTempBufferX[0]);
+
+  AddStringToCache(off, Result);
 end;
 
 procedure TRCFS.AddStringToCache(off: dword; const Value: string);
 begin
-  if fStringCacheCount < STRING_CACHE_SIZE then
-  begin
-    fStringCache[fStringCacheCount].Offset := off;
-    fStringCache[fStringCacheCount].Value := Value;
-    Inc(fStringCacheCount);
-  end;
-end;
+  if fStringCacheCount >= Length(fStringCache) then
+    SetLength(fStringCache, Length(fStringCache) * 2);
 
+  fStringCache[fStringCacheCount].Offset := off;
+  fStringCache[fStringCacheCount].Value := Value;
+  Inc(fStringCacheCount);
+end;
 
 function TRCFS.ReadFileData(inode: rcfs_inode): TBytes;
 begin
@@ -282,13 +244,11 @@ begin
   inStream.Position := 0;
   original_size := inStream.Size;
 
-  // Р‘СѓС„РµСЂРё РѕРґРёРЅ СЂР°Р·
   SetLength(chunk_buffer, LZO_CHUNK_SIZE);
   SetLength(comp_buffer, LZO_CHUNK_SIZE + LZO_CHUNK_SIZE div 16 + 64 + 3);
 
   max_chunks := 1 + (original_size + LZO_CHUNK_SIZE - 1) div LZO_CHUNK_SIZE;
-
-  SetLength(chunk_offsets, max_chunks);
+  SetLength(chunk_offsets, max_chunks + 1);
 
   tempStream := TMemoryStream.Create;
   try
@@ -296,110 +256,92 @@ begin
 
     if t = 1 then
     begin
-      // *** LZO СЂРµР¶РёРј ***
-      chunk_count := 1;
+      chunk_count := 0;
       packed_size := GetPackedSize(inode);
-      packed_size := (packed_size + 3) and not 3;  // РѕРєСЂСѓРіР»РµРЅРЅСЏ РґРѕ DWORD
-      // Р РµР·РµСЂРІСѓС”РјРѕ РјС–СЃС†Рµ РїС–Рґ С‚Р°Р±Р»РёС†СЋ РѕС„СЃРµС‚С–РІ
-      pos_data := max_chunks * 4;
+      packed_size := (packed_size + 3) and not 3;
+
+      pos_data := (max_chunks + 1) * 4;
       tempStream.Size := pos_data;
       tempStream.Position := pos_data;
       chunk_offsets[0] := pos_data;
+
       while inStream.Position < inStream.Size do
       begin
         read_now := inStream.Read(chunk_buffer[0], LZO_CHUNK_SIZE);
         if read_now <= 0 then Break;
 
-        // РЎС‚РёСЃРєР°С”РјРѕ LZO
         comp_size := Length(comp_buffer);
         if lzo1x_999_compress(@chunk_buffer[0], read_now, @comp_buffer[0], comp_size,
           @fWorkBuffer[0]) <> 0 then
-          Exit(-3);// РџРѕРјРёР»РєР° LZO
+          Exit(-3);
 
-        // РћРїС‚РёРјС–Р·СѓС”РјРѕ
         opt_size := read_now;
         if lzo1x_optimize(@comp_buffer[0], comp_size, @chunk_buffer[0], opt_size,
           @fWorkBuffer[0]) <> 0 then
-          Exit(-4); // РџРѕРјРёР»РєР° optimize
+          Exit(-4);
 
-        // Р—Р°РїРёСЃСѓС”РјРѕ СЃС‚РёСЃРЅРµРЅРёР№ Р±Р»РѕРє
-        //tempStream.Position := pos_data;
         tempStream.WriteBuffer(comp_buffer[0], comp_size);
-        //Inc(pos_data, comp_size);
-
-        // Р—Р°РїРёСЃСѓС”РјРѕ РѕС„СЃРµС‚ РїРѕС‚РѕС‡РЅРѕРіРѕ Р±Р»РѕРєСѓ
-        chunk_offsets[chunk_count] := tempStream.Position;
         Inc(chunk_count);
-
+        chunk_offsets[chunk_count] := tempStream.Position;
       end;
 
-      // РџРѕРІРµСЂС‚Р°С”РјРѕСЃСЏ С– Р·Р°РїРёСЃСѓС”РјРѕ С‚Р°Р±Р»РёС†СЋ РѕС„СЃРµС‚С–РІ
       tempStream.Position := 0;
-      for i := 0 to chunk_count - 1 do
+      for i := 0 to chunk_count do
         tempStream.WriteDWord(chunk_offsets[i]);
 
-      // РЈСЃС–РєР°РЅРЅСЏ Р·Р°Р№РІРѕРіРѕ СЂРµР·РµСЂРІСѓ
-      // if tempStream.Size > pos_data then
-      //   tempStream.Size := pos_data;
+      tempStream.Size := chunk_offsets[chunk_count];
 
-      // РџРµСЂРµРІС–СЂРєР° РІРёРіС–РґРЅРѕСЃС‚С– LZO
       if (tempStream.Size > packed_size) and (original_size > packed_size) then
-      begin
-        Exit(-1); // LZO РЅРµ РІРёРіС–РґРЅРёР№
-      end;
+        Exit(-1);
     end
     else
     begin
-      // RAW СЂРµР¶РёРј вЂ” РїСЂРѕСЃС‚Рѕ РєРѕРїС–СЋС”РјРѕ
       tempStream.CopyFrom(inStream, original_size);
-      inode.emode := inode.emode and (not _LZO); // РІРёРјРёРєР°С”РјРѕ LZO
+      inode.emode := inode.emode and (not _LZO);
     end;
 
-    // Р—Р°РїРёСЃ Сѓ fStream
     fStream.Position := inode.offset;
     tempStream.Position := 0;
     fStream.CopyFrom(tempStream, tempStream.Size);
     Result := tempStream.Size;
     hash := SHA256OfStream(tempStream);
 
-    // РћРЅРѕРІР»СЋС”РјРѕ СЂРѕР·РјС–СЂ СЂРѕР·РїР°РєРѕРІР°РЅРѕРіРѕ С„Р°Р№Р»Сѓ
     inode.size := original_size;
   finally
     tempStream.Free;
   end;
 end;
 
-
 function TRCFS.replaceFile(const dst, src: string): integer;
 var
   idx: dword;
-  errCode, outSize: integer;
   inode: rcfs_inode;
   inFile: TFileStream;
   fs: integer;
   hash: TSha256Digest;
 begin
   Result := -1;
-
   idx := getInodeByPath(dst, inode);
   if idx = 0 then Exit;
 
-  inFile := TFileStream.Create(src, fmOpenRead);
+  inFile := TFileStream.Create(src, fmOpenRead or fmShareDenyWrite);
   try
     fs := inFile.Size;
     if fs = 0 then
-      inode.size := 0
+    begin
+      inode.size := 0;
+      FillChar(hash[0], SizeOf(hash), 0);
+    end
     else
       fs := WriteStreamToFile(inFile, inode, hash);
   finally
     inFile.Free;
   end;
-  // Update verifier
-  Result := 0;
+
   if fs >= 0 then
   begin
     SetInode(idx, inode);
-    //Result := update_verifier(idx, fs, hash);
+    Result := update_verifier(idx, fs, hash);
   end;
 end;
 
@@ -418,55 +360,38 @@ begin
     if (table_size < 0) or (table_size mod 4 <> 0) then
       raise Exception.Create('Invalid chunk table size');
 
-    chunk_count := (table_size div 4); // Р±РµР· РїРµСЂС€РѕРіРѕ
+    chunk_count := (table_size div 4);
     last_offset := start_offset;
 
     for i := 1 to chunk_count do
       last_offset := fStream.ReadDWord;
 
-    // СЃСѓРјР°СЂРЅРёР№ СЂРѕР·РјС–СЂ = С‚Р°Р±Р»РёС†СЏ + РІСЃС– Р±Р»РѕРєРё
     Result := last_offset;
   end
   else
     Result := inode.size;
 end;
 
-const
-  { File types }
-  S_IFMT = 61440; { type of file mask}
-  S_IFIFO = 4096;  { named pipe (fifo)}
-  S_IFCHR = 8192;  { character special}
-  S_IFDIR = 16384; { directory }
-  S_IFBLK = 24576; { block special}
-  S_IFREG = 32768; { regular }
-  S_IFLNK = 40960; { symbolic link }
-  S_IFSOCK = 49152; { socket }
-  S_ISUID = &4000;
-  S_ISGID = &2000;
-  S_ISVTX = &1000;
-
 function TRCFS.corruptFile(const dst: string): integer;
 var
   idx: dword;
   inode: rcfs_inode;
-  b: byte;
-  ms : TMemoryStream;
-  hash : TSha256Digest;
+  ms: TMemoryStream;
+  hash: TSha256Digest;
 begin
   Result := -1;
   idx := getInodeByPath(dst, inode);
   if (idx = 0) or (inode.size = 0) or ((inode.mode and S_IFDIR) = S_IFDIR) then Exit;
+
   ms := TMemoryStream.Create;
   try
-    //ExtractFileToStream(inode, ms);
     ms.SetSize(inode.size);
-    ms.Position :=0;
+    ms.Position := 0;
     Result := WriteStreamToFile(ms, inode, hash);
   finally
-    FreeAndNil(ms);
+    ms.Free;
   end;
 end;
-
 
 function TRCFS.chmod(const dst: string; mode: integer): integer;
 var
@@ -477,7 +402,8 @@ begin
   idx := getInodeByPath(dst, inode);
   if (idx = 0) then Exit;
   inode.mode := (inode.mode and not ($FFF)) or (mode and $FFF);
-  setInode(idx, inode);
+  SetInode(idx, inode);
+  Result := 0;
 end;
 
 function TRCFS.chown(const dst: string; GID, UID: integer): integer;
@@ -488,11 +414,11 @@ begin
   Result := -1;
   idx := getInodeByPath(dst, inode);
   if (idx = 0) then Exit;
-  inode.gid := gid;
-  inode.uid := uid;
-  setInode(idx, inode);
+  inode.gid := GID;
+  inode.uid := UID;
+  SetInode(idx, inode);
+  Result := 0;
 end;
-
 
 function TRCFS.getInodeByPath(const Path: string; var inode: rcfs_inode): dword;
 var
@@ -502,7 +428,7 @@ var
   DI: TRCFSdir;
   found: boolean;
 begin
-  Result := 1; // Root inode
+  Result := 1;
 
   if (Path = '') or (Path = '/') then
   begin
@@ -520,7 +446,7 @@ begin
     s := ReadDir(inode.offset, inode.size, DI);
     found := False;
 
-    for j := 0 to High(DI) do
+    for j := 0 to s - 1 do
     begin
       aName := GetCachedString(DI[j].nameoffset);
       if aName = pathParts[i] then
@@ -540,12 +466,12 @@ begin
   end;
 end;
 
-function TRCFS.update_verifier(inode, packed_size: dword; const hash: TSha256Digest): integer;
+function TRCFS.update_verifier(inodeIdx, packed_size: dword; const hash: TSha256Digest): integer;
 var
   j: integer;
 begin
   Result := -1;
-  j := FastVerifierLookup(inode);
+  j := FastVerifierLookup(inodeIdx);
   if j >= 0 then
   begin
     fVerData[j].packed_size := packed_size;
@@ -567,7 +493,7 @@ begin
   fStream.ReadBuffer(Result, SizeOf(rcfs_inode));
 end;
 
-procedure TRCFS.SetInode(idx: dword; aValue: rcfs_inode);
+procedure TRCFS.SetInode(idx: dword; const aValue: rcfs_inode);
 begin
   fStream.Position := fInodes + (idx - 1) * SizeOf(rcfs_inode);
   fStream.WriteBuffer(aValue, SizeOf(rcfs_inode));
@@ -582,8 +508,6 @@ begin
   fStream.Position := 0;
   fStream.ReadBuffer(hdr, SizeOf(rcfs_hdr));
 
-  //if CompareMem(@hdr.magic[0], @'rimh'[1], 4) then
-  //begin
   fStream.Position := $1000;
   fStream.ReadBuffer(fSuperblock, SizeOf(rcfs_superblock));
 
@@ -606,14 +530,19 @@ begin
       end;
     end;
   end;
-  //~end;
 end;
 
 function TRCFS.readString(off: dword): string;
+var
+  bytesRead: integer;
 begin
+  if off >= fStream.Size then Exit('');
   fStream.Position := off;
-  fStream.ReadBuffer(fTempBufferX[0], Min(MAX_NAME_LEN, fStream.Size - fStream.Position));
-  Result := PChar(@fTempBufferX[0]);
+  bytesRead := fStream.Read(fTempBufferX[0], Min(MAX_NAME_LEN - 1, fStream.Size - off));
+  if bytesRead <= 0 then Exit('');
+
+  fTempBufferX[bytesRead] := 0;
+  Result := pansichar(@fTempBufferX[0]);
 end;
 
 procedure TRCFS.CheckUnverified;
@@ -633,7 +562,7 @@ procedure TRCFS.CheckUnverified;
     begin
       aName := GetCachedString(DI[i].nameoffset);
 
-      if (DI[i].mode and 16384) = 16384 then
+      if (DI[i].mode and S_IFDIR) = S_IFDIR then
         processDir(DI[i], cur_path + DirectorySeparator + aName)
       else
       begin
@@ -699,18 +628,15 @@ var
   t: integer;
 begin
   fStream.Position := inode.offset;
-  SetLength(fDecompBuffer, LZO_CHUNK_SIZE * 2);
   t := (QWord(inode.emode) shl $17) shr $1E;
 
   if t = 1 then
   begin
-    // ---- 1. Р§РёС‚Р°С”РјРѕ С‚Р°Р±Р»РёС†СЋ РѕС„СЃРµС‚С–РІ ----
     first_offset := fStream.ReadDWord;
     SetLength(offsets, 1);
     offsets[0] := first_offset;
     chunk_count := 1;
 
-    // Р§РёС‚Р°С”РјРѕ С–РЅС€С– РѕС„СЃРµС‚Рё РїРѕРєРё РЅРµ РґС–Р№РґРµРјРѕ РґРѕ РїРѕС‡Р°С‚РєСѓ РїРµСЂС€РѕРіРѕ С‡Р°РЅРєСѓ
     while fStream.Position < inode.offset + first_offset do
     begin
       tmp_offset := fStream.ReadDWord;
@@ -719,21 +645,19 @@ begin
       Inc(chunk_count);
     end;
 
-    // ---- 2. Р РѕР·РїР°РєРѕРІСѓС”РјРѕ С‡Р°РЅРєРё ----
     for i := 0 to High(offsets) - 1 do
     begin
       chunk_start := offsets[i];
       chunk_end := offsets[i + 1];
       chunk_size := chunk_end - chunk_start;
 
-      if chunk_size <= 0 then
-        raise Exception.CreateFmt('Invalid chunk size at %d', [i]);
+      if chunk_size = 0 then Continue;
 
       SetLength(fTempBuffer, chunk_size);
       fStream.Position := inode.offset + chunk_start;
       fStream.ReadBuffer(fTempBuffer[0], chunk_size);
 
-      decompressed_size := 0;
+      decompressed_size := Length(fDecompBuffer);
       if lzo1x_decompress_safe(@fTempBuffer[0], chunk_size, @fDecompBuffer[0],
         decompressed_size, nil) <> 0 then
         raise Exception.CreateFmt('Decompress failed at chunk %d', [i]);
@@ -742,11 +666,13 @@ begin
     end;
   end
   else
-    outStream.CopyFrom(fStream, inode.size);
-
-  SetLength(fDecompBuffer, 0);
+  begin
+    // Виправлення: позиціонування перед нестисненим копіюванням
+    fStream.Position := inode.offset;
+    if inode.size > 0 then
+      outStream.CopyFrom(fStream, inode.size);
+  end;
 end;
-
 
 procedure TRCFS.ExtractTree(const inode: rcfs_inode; const outPath: string);
 var
@@ -757,34 +683,34 @@ var
 begin
   Name := ReadString(inode.nameoffset);
   if Name <> '' then
-    xPath := outPath + PathDelim + Name
+    xPath := outPath + DirectorySeparator + Name
   else
     xPath := outPath;
+
   WriteLn(Format('%.4X %.4X %s', [inode.mode, inode.emode, xPath]));
+
   if (inode.mode and S_IFDIR) = S_IFDIR then
   begin
     k := ReadDir(inode.offset, inode.size, DI);
     if not DirectoryExists(xPath) then
-      MkDir(xPath);
+      ForceDirectories(xPath);
+
     for i := 0 to k - 1 do
       ExtractTree(DI[i], xPath);
-    SetLength(DI, 0);
   end
   else if (inode.mode and S_IFREG) = S_IFREG then
   begin
     fOut := TFileStream.Create(xPath, fmCreate);
-
     try
       if inode.size > 0 then
         ExtractFileToStream(inode, fOut);
     finally
-      FreeAndNil(fOut);
+      fOut.Free;
     end;
-
   end;
+
   chmod(xPath, inode.mode);
   chown(xPath, inode.gid, inode.uid);
-
 end;
 
 initialization

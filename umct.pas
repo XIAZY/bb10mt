@@ -38,7 +38,6 @@ type
     ekEnd = $FF
     );
 
-
   TMCTEntry = record
     RawType: byte;
     RawData: TBytes;
@@ -51,11 +50,12 @@ type
     Entries: array of TMCTEntry;
   end;
 
-
 function ParseMCTStream(Stream: TStream): TMCTParsed;
 procedure ExtractMCTPartitionsToFiles(Stream: TStream; const Parsed: TMCTParsed; const DestDir: string);
 procedure RunExtract(const DumpFile: string; const OutDir: string);
 procedure ParseAndShow(const FileName: string);
+procedure ShowParsedMCT(const Parsed: TMCTParsed; Verbose: boolean = False);
+function GetPartitionName(const NameArr: array of char): string;
 
 implementation
 
@@ -64,6 +64,17 @@ uses crc;
 function CalcCRC32(const Buf; Len: longword): longword; inline;
 begin
   Result := crc32(0, @Buf, Len);
+end;
+
+function GetPartitionName(const NameArr: array of char): string;
+var
+  Len: integer;
+begin
+  Len := 0;
+  while (Len < Length(NameArr)) and (NameArr[Len] <> #0) do
+    Inc(Len);
+  SetString(Result, PChar(@NameArr[0]), Len);
+  Result := Trim(Result);
 end;
 
 function GetEntryKind(RawType: byte): TMCTEntryKind;
@@ -79,7 +90,6 @@ begin
   end;
 end;
 
-
 function ParseMCTStream(Stream: TStream): TMCTParsed;
 var
   Hdr: TMCTHeader;
@@ -87,8 +97,9 @@ var
   Buf: TBytes;
   Entry: TMCTEntry;
   RawMem: TMemoryStream;
-  PosBefore: int64;
   CRCFromBlock, CRCActual: longword;
+  Capacity, Count: integer;
+  CRCPosInRawMem: int64;
 begin
   FillChar(Result, SizeOf(Result), 0);
 
@@ -101,13 +112,16 @@ begin
   if Hdr.Major <> 1 then
     raise Exception.Create('Unsupported MCT version');
 
+  Capacity := 16;
+  Count := 0;
+  SetLength(Result.Entries, Capacity);
+
   RawMem := TMemoryStream.Create;
   try
     RawMem.WriteBuffer(Hdr, SizeOf(Hdr));
 
     while Stream.Position + 2 <= Stream.Size do
     begin
-      PosBefore := Stream.Position;
       Stream.ReadBuffer(T, 1);
       Stream.ReadBuffer(L, 1);
 
@@ -115,11 +129,16 @@ begin
         raise Exception.CreateFmt('Invalid TLV type=%.2x len=%d', [T, L]);
 
       SetLength(Buf, L - 2);
-      Stream.ReadBuffer(Buf[0], Length(Buf));
+      if Length(Buf) > 0 then
+        Stream.ReadBuffer(Buf[0], Length(Buf));
+
+      CRCPosInRawMem := RawMem.Position;
+      // Запам'ятовуємо позицію до запису поточного TLV
 
       RawMem.WriteBuffer(T, 1);
       RawMem.WriteBuffer(L, 1);
-      RawMem.WriteBuffer(Buf[0], Length(Buf));
+      if Length(Buf) > 0 then
+        RawMem.WriteBuffer(Buf[0], Length(Buf));
 
       FillChar(Entry, SizeOf(Entry), 0);
       Entry.RawType := T;
@@ -127,28 +146,35 @@ begin
 
       case T of
         $39:
-          if Length(Buf) = SizeOf(TMCTPartition) then
+          if Length(Buf) >= SizeOf(TMCTPartition) then
             Move(Buf[0], Entry.Partition, SizeOf(TMCTPartition));
         $26:
           if Length(Buf) >= SizeOf(TMCTConfig26) then
             Move(Buf[0], Entry.Config, SizeOf(TMCTConfig26));
       end;
 
-      SetLength(Result.Entries, Length(Result.Entries) + 1);
-      Result.Entries[High(Result.Entries)] := Entry;
+      if Count >= Capacity then
+      begin
+        Capacity := Capacity * 2;
+        SetLength(Result.Entries, Capacity);
+      end;
+
+      Result.Entries[Count] := Entry;
+      Inc(Count);
 
       if T = $09 then
       begin
-        if Length(Buf) < 6 then
+        if Length(Buf) < 4 then
           raise Exception.Create('CRC block too short');
 
-        CRCFromBlock := PLongWord(@Buf[2])^;
-        CRCActual := CalcCRC32(RawMem.Memory^, RawMem.Size - L);
+        CRCFromBlock := PLongWord(@Buf[0])^;
+        // Залежно від структури блоку (зазвичай offset 0 або 2)
+        CRCActual := CalcCRC32(RawMem.Memory^, CRCPosInRawMem);
 
         if CRCActual = CRCFromBlock then
           Writeln(Format('[CRC] OK: %.8x', [CRCActual]))
         else
-          Writeln(Format('[CRC] MISMATCH! Got=%.8x  Expected=%.8x', [CRCFromBlock, CRCActual]));
+          Writeln(Format('[CRC] MISMATCH! Got=%.8x Expected=%.8x', [CRCFromBlock, CRCActual]));
       end;
 
       if T = $FF then
@@ -157,14 +183,16 @@ begin
   finally
     RawMem.Free;
   end;
+
+  SetLength(Result.Entries, Count);
 end;
 
-
-procedure ShowParsed(const Parsed: TMCTParsed);
+procedure ShowParsedMCT(const Parsed: TMCTParsed; Verbose: boolean = False);
 var
   i: integer;
   E: TMCTEntry;
   K: TMCTEntryKind;
+  PartName: string;
 begin
   for i := 0 to High(Parsed.Entries) do
   begin
@@ -173,10 +201,12 @@ begin
 
     case K of
       ekPartition:
+      begin
+        PartName := GetPartitionName(E.Partition.Name);
         Writeln(Format('[%d] Partition "%s" Offset=$%.8x Size=$%.8x Type=$%.2x',
-          [i, PChar(@E.Partition.Name), E.Partition.StartBlock shl 16,
-          ((E.Partition.EndBlock + 1) shl 16) - (E.Partition.StartBlock shl 16),
-          E.Partition.PartitionID]));
+          [i, PartName, E.Partition.StartBlock shl 16, ((E.Partition.EndBlock + 1) shl 16) -
+          (E.Partition.StartBlock shl 16), E.Partition.PartitionID]));
+      end;
       ekConfig:
         Writeln(Format('[%d] Config Param=%.4x Value=%.4x Flags=%.8x',
           [i, E.Config.ParamCode, E.Config.ParamValue, E.Config.Flags]));
@@ -192,16 +222,15 @@ begin
   end;
 end;
 
-
 procedure ParseAndShow(const FileName: string);
 var
   FS: TFileStream;
   Parsed: TMCTParsed;
 begin
-  FS := TFileStream.Create(FileName, fmOpenRead);
+  FS := TFileStream.Create(FileName, fmOpenRead or fmShareDenyNone);
   try
     Parsed := ParseMCTStream(FS);
-    ShowParsed(Parsed);
+    ShowParsedMCT(Parsed);
   finally
     FS.Free;
   end;
@@ -210,67 +239,80 @@ end;
 procedure ExtractMCTPartitionsToFiles(Stream: TStream; const Parsed: TMCTParsed; const DestDir: string);
 const
   BLOCK_SIZE = $10000;
+  CHUNK_SIZE = $100000; // 1MB buffer for fast stream copying
 var
   BaseAddr, NvramOffset: QWord;
   i: integer;
   E: TMCTEntry;
-  FileName: string;
+  FileName, PartName: string;
   FileStream: TFileStream;
-  PartOffset, PartSize: QWord;
-  Buf: array of byte;
+  PartOffset, PartSize, BytesToRead, BytesRead: QWord;
+  Buf: array[0..CHUNK_SIZE - 1] of byte;
   FoundNVRAM: boolean;
 begin
   FoundNVRAM := False;
+  NvramOffset := 0;
 
-  // 1. Знаходимо nvram
+  // 1. Знаходимо nvram для обчислення базового зміщення
   for i := 0 to High(Parsed.Entries) do
   begin
     E := Parsed.Entries[i];
     if GetEntryKind(E.RawType) = ekPartition then
-      if SameText(Trim(PChar(@E.Partition.Name)), 'nvram') then
+    begin
+      PartName := GetPartitionName(E.Partition.Name);
+      if SameText(PartName, 'nvram') then
       begin
         NvramOffset := QWord(E.Partition.StartBlock) * BLOCK_SIZE;
         BaseAddr := NvramOffset - BLOCK_SIZE;
         FoundNVRAM := True;
         Break;
       end;
+    end;
   end;
 
   if not FoundNVRAM then
     raise Exception.Create('Partition "nvram" not found. Cannot determine base address');
 
-  Writeln(Format('[i] NVRAM offset = $%.8x → BaseAddr = $%.8x', [NvramOffset, BaseAddr]));
+  Writeln(Format('[i] NVRAM offset = $%.8x -> BaseAddr = $%.8x', [NvramOffset, BaseAddr]));
 
-  // 2. Зберігаємо всі розділи
+  // 2. Зберігаємо всі розділи блоковим копіюванням
   for i := 0 to High(Parsed.Entries) do
   begin
     E := Parsed.Entries[i];
     if GetEntryKind(E.RawType) <> ekPartition then
       continue;
 
+    PartName := GetPartitionName(E.Partition.Name);
     PartOffset := QWord(E.Partition.StartBlock) * BLOCK_SIZE;
     PartSize := (QWord(E.Partition.EndBlock + 1) * BLOCK_SIZE) - PartOffset;
 
     if PartOffset < BaseAddr then
     begin
-      Writeln(Format('[!] Partition "%s" before base address. Skipping.',
-        [PChar(@E.Partition.Name)]));
+      Writeln(Format('[!] Partition "%s" before base address. Skipping.', [PartName]));
       continue;
     end;
 
     FileName := Format('%s/%2.2x_%s.bin', [IncludeTrailingPathDelimiter(DestDir),
-      E.Partition.PartitionID, Trim(PChar(@E.Partition.Name))]);
+      E.Partition.PartitionID, PartName]);
 
-    Writeln(Format('[+] Writing partition "%s" to "%s" Offset=$%.8x Size=%.x',
-      [PChar(@E.Partition.Name), FileName, PartOffset, PartSize]));
+    Writeln(Format('[+] Writing partition "%s" to "%s" Offset=$%.8x Size=$%.8x',
+      [PartName, FileName, PartOffset, PartSize]));
 
-    SetLength(Buf, PartSize);
     Stream.Position := PartOffset - BaseAddr;
-    Stream.ReadBuffer(Buf[0], PartSize);
-
     FileStream := TFileStream.Create(FileName, fmCreate);
     try
-      FileStream.WriteBuffer(Buf[0], Length(Buf));
+      BytesToRead := PartSize;
+      while BytesToRead > 0 do
+      begin
+        if BytesToRead > CHUNK_SIZE then
+          BytesRead := CHUNK_SIZE
+        else
+          BytesRead := BytesToRead;
+
+        Stream.ReadBuffer(Buf[0], BytesRead);
+        FileStream.WriteBuffer(Buf[0], BytesRead);
+        Dec(BytesToRead, BytesRead);
+      end;
     finally
       FileStream.Free;
     end;
@@ -282,15 +324,14 @@ var
   FS: TFileStream;
   Parsed: TMCTParsed;
 begin
-  FS := TFileStream.Create(DumpFile, fmOpenRead);
+  FS := TFileStream.Create(DumpFile, fmOpenRead or fmShareDenyNone);
   try
     Parsed := ParseMCTStream(FS);
-    ShowParsed(Parsed); // необов'язково
+    ShowParsedMCT(Parsed);
     ExtractMCTPartitionsToFiles(FS, Parsed, OutDir);
   finally
     FS.Free;
   end;
 end;
-
 
 end.

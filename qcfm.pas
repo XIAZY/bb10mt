@@ -68,7 +68,6 @@ type
     Count: dword;
   end;
 
-
 type
   TRRChunk = record
     Offset: int64;
@@ -80,15 +79,13 @@ type
     Size: int64;
     Flags: dword;
     ChunkType: string;
-    BlockCount: integer; // для прогресу
-    BlockSize: integer;  // розмір блока
+    BlockCount: integer;
+    BlockSize: integer;
     RR: array of TRRChunk;
   end;
 
   TMFCQChunkArray = array of TMFCQChunk;
 
-
-type
   TMFCQChunkArrays = record
     V1: TMFCQChunkArray;
     V2: TMFCQChunkArray;
@@ -111,8 +108,8 @@ uses Math, crc, StrUtils, FileUtil;
 
 type
   TBlockRange = record
-    BlockIndex: integer;   // Індекс першого непорожнього блоку
-    Count: integer;      // Кількість непорожніх блоків підряд
+    BlockIndex: integer;
+    Count: integer;
   end;
 
   TBlockRangeArray = array of TBlockRange;
@@ -133,12 +130,11 @@ const
   imageDMI_MBR = $12;
   imageDMI_FSYS = $13;
   imageOS = $18;
-  imageDMI_SIG2 = $93;
   imageSIG2 = $89;
   imageR_SIG2 = $8C;
+  imageDMI_SIG2 = $93;
 
   defaultBlockSize = $10000;
-
 
 function AnalyzeFileBlocks(const FileName: string; BlockSize: integer = 4096): TBlockRangeArray;
 var
@@ -161,14 +157,10 @@ begin
     while F.Position < F.Size do
     begin
       BytesRead := F.Read(Buf[0], BlockSize);
-
-      if (BytesRead > 0) then
+      if BytesRead > 0 then
       begin
-        // обітнемо зайві байти, якщо блок неповний
         if BytesRead < BlockSize then
-          SetLength(Buf, BytesRead)
-        else
-          SetLength(Buf, BlockSize);
+          SetLength(Buf, BytesRead);
 
         if not IsFullFFBlock_Branchless(Buf, High(Buf)) then
         begin
@@ -192,7 +184,6 @@ begin
           end;
         end;
 
-        // відновити розмір буфера
         if Length(Buf) <> BlockSize then
           SetLength(Buf, BlockSize);
       end;
@@ -200,7 +191,6 @@ begin
       Inc(BlockIndex);
     end;
 
-    // додати останній блок, якщо потрібно
     if InRange then
     begin
       SetLength(Result, Length(Result) + 1);
@@ -263,7 +253,7 @@ begin
     '.os': Result := imageOS;
     '.dmi.sig2': Result := imageDMI_SIG2;
     else
-      Result := 0; // Default/unknown type
+      Result := 0;
   end;
 end;
 
@@ -272,15 +262,9 @@ var
   fs: int64;
 begin
   fs := FileSize(FileName);
-  if fs <= 0 then
-  begin
-    Result := 0;
-    Exit;
-  end;
-
+  if fs <= 0 then Exit(0);
   Result := fs div bs;
-  if (fs mod bs) <> 0 then
-    Inc(Result);
+  if (fs mod bs) <> 0 then Inc(Result);
 end;
 
 procedure _packMFCQ(outFile: TStream; const iFiles: TStringList; cb: TProgressCallback = nil;
@@ -298,8 +282,8 @@ var
   mhf2: TMultiHeaderFileV2;
   XRec: array of TXRec;
   flags, i, j, k, s, bs, c: integer;
-  buf: array of byte;
-  tmps: TStringArray;
+  buf: TBytes;
+  tmps, params: TStringArray;
   fileName: string;
   blockIdx, blockOffset: int64;
   totalFiles: integer;
@@ -322,7 +306,7 @@ begin
 
   bs := defaultBlockSize;
   totalFiles := iFiles.Count;
-  fast := ver = 2;
+  fast := (ver = 2);
   SetLength(XRec, totalFiles);
   SetLength(XBRA, totalFiles);
 
@@ -330,27 +314,28 @@ begin
   mhf1.magic := 'mfcq';
   mhf1.version := 1;
   mhf1.nheaders := totalFiles;
-  mhf1.flags := IfThen(ver > 1, SizeOf(TMultiHeaderFileV1), 0);  // TEMP: will be overwritten
+  mhf1.flags := IfThen(ver > 1, SizeOf(TMultiHeaderFileV1), 0);
 
   for i := 0 to totalFiles - 1 do
   begin
+    // Виправлений парсинг "filename=delta,flags"
     tmps := SplitString(iFiles[i], '=');
     fileName := ExpandFileName(tmps[0]);
-    iFiles[i] := fileName;
-    if length(tmps) > 1 then
+
+    Delta := 0;
+    Flags := 0;
+
+    if Length(tmps) > 1 then
     begin
-      tmpS := SplitString(tmps[1], ',');
-      Delta := StrToIntDef(tmps[0], 0);
-      if length(tmpS) > 1 then
-        Flags := StrToIntDef(tmps[1], 0)
+      params := SplitString(tmps[1], ',');
+      if Length(params) > 0 then
+        Delta := StrToIntDef(params[0], 0);
+      if Length(params) > 1 then
+        Flags := StrToIntDef(params[1], 0)
       else
-        Flags := IfThen(fileName[Length(fileName)] = '!', 2, 0);
-    end
-    else
-    begin
-      Delta := 0;
-      Flags := 0;
+        Flags := IfThen((Length(fileName) > 0) and (fileName[Length(fileName)] = '!'), 2, 0);
     end;
+
     if not FileExists(fileName) then
       raise Exception.CreateFmt('Input file not found: %s', [fileName]);
 
@@ -377,7 +362,9 @@ begin
         cf1.partition := 0;
         cf1.nrecords := GetValue(c);
         SetLength(arr1, cf1.nrecords);
-        FillChar(arr1[0], Length(arr1) * SizeOf(TRunRecordV1), 0);
+        if cf1.nrecords > 0 then
+          FillChar(arr1[0], Length(arr1) * SizeOf(TRunRecordV1), 0);
+
         for j := 0 to c - 1 do
         begin
           arr1[j].offset := Delta + XBRA[i][j].BlockIndex;
@@ -444,11 +431,17 @@ begin
         dataSize := c * SizeOf(TRunRecordV1);
         totalSize := SizeOf(TControlFileV1) + dataSize;
 
-        cf1.datachecksum := crc32(0, @arr1[0], dataSize);
+        if c > 0 then
+          cf1.datachecksum := crc32(0, @arr1[0], dataSize)
+        else
+          cf1.datachecksum := 0;
+
         cf1.checksum := 0;
         SetLength(buf, totalSize);
         Move(cf1, buf[0], SizeOf(TControlFileV1));
-        Move(arr1[0], buf[SizeOf(TControlFileV1)], dataSize);
+        if dataSize > 0 then
+          Move(arr1[0], buf[SizeOf(TControlFileV1)], dataSize);
+
         cf1.checksum := crc32(0, @buf[8], totalSize - 8);
         Move(cf1, buf[0], SizeOf(TControlFileV1));
         outFile.WriteBuffer(buf[0], totalSize);
@@ -456,7 +449,6 @@ begin
     end;
   end;
 
-  // Запам’ятовуємо позицію для V2 заголовка
   xPos := outFile.Position;
   mhf1.flags := xPos;
 
@@ -473,7 +465,8 @@ begin
       with XRec[i] do
       begin
         outFile.WriteBuffer(cf2, SizeOf(TControlFileV2));
-        outFile.WriteBuffer(arr2[0], cf2.nrecords * SizeOf(TRunRecordV2));
+        if cf2.nrecords > 0 then
+          outFile.WriteBuffer(arr2[0], cf2.nrecords * SizeOf(TRunRecordV2));
       end;
     end;
   end;
@@ -483,7 +476,8 @@ begin
   SetLength(buf, bs);
   for i := 0 to totalFiles - 1 do
   begin
-    fileName := iFiles[i];
+    tmps := SplitString(iFiles[i], '=');
+    fileName := ExpandFileName(tmps[0]);
     inFile := TFileStream.Create(fileName, fmOpenRead or fmShareDenyNone);
     try
       if Assigned(cb) then
@@ -495,15 +489,13 @@ begin
         begin
           blockIdx := range.BlockIndex + k;
           blockOffset := blockIdx * bs;
-          if blockOffset >= inFile.Size then
-            Continue;
+          if blockOffset >= inFile.Size then Continue;
 
           s := bs;
           if blockOffset + bs > inFile.Size then
             s := inFile.Size - blockOffset;
 
-          if s <= 0 then
-            Continue;
+          if s <= 0 then Continue;
 
           if Assigned(cb) then
             cb(fileName, blockOffset div bs, inFile.Size div bs);
@@ -521,7 +513,6 @@ begin
       inFile.Free;
     end;
   end;
-
 end;
 
 procedure packMFCQ(oFile: string; const iFiles: TStringList; cb: TProgressCallback = nil;
@@ -539,7 +530,6 @@ begin
     FreeAndNil(outFile);
   end;
 end;
-
 
 type
   TRR = array of TRRChunk;
@@ -565,13 +555,13 @@ var
   end;
 
   procedure ReadRunRecords(n: integer; bs: integer; var RR: TRR; useV2: boolean;
-  var blkCount: integer; var sizeOut: int64);
+  var blkCount: integer; var payloadSize: int64);
   var
     k, realCount: integer;
-    size: int64;
     tmpRR: array of TRRChunk;
   begin
-    size := 0;
+    payloadSize := 0;
+    blkCount := 0;
     realCount := 0;
     SetLength(tmpRR, n);
 
@@ -587,21 +577,19 @@ var
         tmpRR[realCount].Offset := rr2.offset;
         Inc(realCount);
         Inc(blkCount, rr2.Count);
-        Inc(size, int64(rr2.Count * bs));
-        sizeOut := int64(rr2.offset + rr2.Count * bs);
+        Inc(payloadSize, int64(rr2.Count) * bs);
       end
       else
       begin
         Validate(SizeOf(rr1), 'Truncated - V1 run record');
         inFile.ReadBuffer(rr1, SizeOf(rr1));
         if (rr1.Count = 0) and (rr1.Offset = 0) then
-          Continue; // Пропускаємо порожні записи
+          Continue;
         tmpRR[realCount].Count := rr1.Count;
         tmpRR[realCount].Offset := rr1.Offset;
         Inc(realCount);
         Inc(blkCount, rr1.Count);
-        Inc(size, int64(rr1.Count * bs));
-        sizeOut := int64(rr1.offset + rr1.Count * bs);
+        Inc(payloadSize, int64(rr1.Count) * bs);
       end;
     end;
 
@@ -609,8 +597,7 @@ var
     if realCount > 0 then
       Move(tmpRR[0], RR[0], realCount * SizeOf(TRRChunk));
 
-    sizeOut := size;
-    Inc(payloadOff, size);
+    Inc(payloadOff, payloadSize);
   end;
 
 begin
@@ -626,16 +613,14 @@ begin
     inFile.Position := mhf1.flags;
     Validate(SizeOf(mhf2), 'Truncated V2 header');
     inFile.ReadBuffer(mhf2, SizeOf(mhf2));
-    isV2Present := mhf2.magic = 'mfcq';
-    if mhf1.flags = 32 then
-      isV1Present := False;
+    isV2Present := (mhf2.magic = 'mfcq');
+    isV1Present := (mhf1.flags <> 32);
   end
   else
   begin
     isV1Present := True;
     isV2Present := False;
   end;
-
 
   v1Count := mhf1.nheaders;
   v2Count := IfThen(isV2Present, mhf2.nheaders, 0);
@@ -661,9 +646,7 @@ begin
         Offset := payloadOff;
         ChunkType := Format('.unk_%d', [i]);
         BlockSize := bs;
-        BlockCount := 0;
         Flags := cf1.flags;
-        SetLength(RR, cf1.nrecords);
         ReadRunRecords(cf1.nrecords, bs, RR, False, BlockCount, Size);
       end;
     end;
@@ -677,7 +660,7 @@ begin
     begin
       Validate(SizeOf(cf2), 'Truncated V2 control');
       inFile.ReadBuffer(cf2, SizeOf(cf2));
-      if (cf2.magic <> 'pfcq') or (cf2.version <> $2 shl 16) then
+      if (cf2.magic <> 'pfcq') or (cf2.version <> $20000) then
         raise Exception.Create('Invalid V2 control file');
 
       bs := IfThen(cf2.blocksize > 0, cf2.blocksize, defaultBlockSize);
@@ -689,8 +672,6 @@ begin
         if ChunkType = '.unk' then
           ChunkType := Format('.unk_%d', [i]);
         BlockSize := bs;
-        BlockCount := 0;
-        SetLength(RR, cf2.nrecords);
         ReadRunRecords(cf2.nrecords, bs, RR, True, BlockCount, Size);
       end;
     end;
@@ -715,66 +696,64 @@ begin
   end;
 end;
 
-
 procedure Chunk2Stream(inFile: TStream; const chunk: TMFCQChunk; outFile: TStream;
   cb: TProgressCallback = nil; outFileName: string = '');
 var
   i, j, k: integer;
-  buf: array of byte;
-  baseOffset: integer = 0;
-  posRead, targetOffset: int64;
-  gapSize: int64;
-  zeroBuf: array of byte;
+  buf, padBuf: TBytes;
+  baseOffset: int64;
+  targetOffset, gapSize: int64;
 begin
-  SetLength(buf, Chunk.BlockSize);
-  SetLength(zeroBuf, Chunk.BlockSize); // заповнений нулями за замовчуванням
-  FillByte(zeroBuf[0], Chunk.BlockSize, $FF);
-  posRead := Chunk.Offset;
-  inFile.Position := posRead;
-  if Assigned(cb) then
-    cb(outFileName, -1, Chunk.BlockCount);
+  SetLength(buf, chunk.BlockSize);
+  SetLength(padBuf, chunk.BlockSize);
+  FillChar(padBuf[0], chunk.BlockSize, $FF);
 
+  inFile.Position := chunk.Offset;
+  if Assigned(cb) then
+    cb(outFileName, -1, chunk.BlockCount);
+
+  baseOffset := 0;
   if Length(chunk.RR) > 0 then
-    baseOffset := Chunk.RR[0].Offset;
+    baseOffset := chunk.RR[0].Offset;
+
   k := 0;
   for i := 0 to Length(chunk.RR) - 1 do
   begin
-    for j := 0 to pred(Chunk.RR[i].Count) do
+    for j := 0 to chunk.RR[i].Count - 1 do
     begin
-      targetOffset := Chunk.BlockSize * ((Chunk.RR[i].Offset + j) - baseOffset);
+      targetOffset := int64(chunk.BlockSize) * ((chunk.RR[i].Offset + j) - baseOffset);
 
-      // Якщо є проміжок, заповнити FF
+      // Якщо є розрив в адресації блоків, заповнюємо $FF
       if outFile.Position < targetOffset then
       begin
         gapSize := targetOffset - outFile.Position;
         while gapSize > 0 do
         begin
-          if gapSize >= Chunk.BlockSize then
+          if gapSize >= chunk.BlockSize then
           begin
-            outFile.WriteBuffer(zeroBuf[0], Chunk.BlockSize);
-            Dec(gapSize, Chunk.BlockSize);
+            outFile.WriteBuffer(padBuf[0], chunk.BlockSize);
+            Dec(gapSize, chunk.BlockSize);
           end
           else
           begin
-            outFile.WriteBuffer(zeroBuf[0], gapSize);
+            outFile.WriteBuffer(padBuf[0], gapSize);
             gapSize := 0;
           end;
         end;
       end;
 
-      if inFile.Position + Chunk.BlockSize > inFile.Size then
+      if inFile.Position + chunk.BlockSize > inFile.Size then
         raise Exception.Create('File truncated - cannot read data block');
 
       Inc(k);
       if Assigned(cb) then
-        cb(outFileName, k, Chunk.BlockCount);
+        cb(outFileName, k, chunk.BlockCount);
 
-      inFile.Read(buf[0], Chunk.BlockSize);
-      outFile.WriteBuffer(buf[0], Chunk.BlockSize);
+      inFile.ReadBuffer(buf[0], chunk.BlockSize);
+      outFile.WriteBuffer(buf[0], chunk.BlockSize);
     end;
   end;
 end;
-
 
 procedure SaveMFCQChunksToFiles(const FileName: string; const Chunks: TMFCQChunkArrays;
   cb: TProgressCallback = nil);
@@ -784,10 +763,11 @@ var
   bc, c, i: integer;
   outFileName: string;
   v: integer = 0;
+  firstRunOffset: int64;
 begin
   if Length(Chunks.V1) > 0 then v := v + 1;
   if Length(Chunks.V2) > 0 then v := v + 2;
-  if v = 0 then exit;
+  if v = 0 then Exit;
 
   inFile := TFileStream.Create(FileName, fmOpenRead or fmShareDenyNone);
   try
@@ -815,12 +795,19 @@ begin
         try
           if (v and 1) = 1 then
           begin
-            Chunk2Stream(inFile, chunks.V1[i], outFile, cb, outFileName);
-            outFileName := outFileName + '=' + IntToStr(chunks.V1[i].RR[0].Offset) +
-              ',' + IntToStr(Chunks.V1[i].Flags);
+            Chunk2Stream(inFile, Chunks.V1[i], outFile, cb, outFileName);
+
+            // Безпечна перевірка наявність елемента у масиві RR
+            firstRunOffset := 0;
+            if Length(Chunks.V1[i].RR) > 0 then
+              firstRunOffset := Chunks.V1[i].RR[0].Offset;
+
+            outFileName := outFileName + '=' + IntToStr(firstRunOffset) + ',' +
+              IntToStr(Chunks.V1[i].Flags);
           end
           else
-            Chunk2Stream(inFile, chunks.V2[i], outFile, cb, outFileName);
+            Chunk2Stream(inFile, Chunks.V2[i], outFile, cb, outFileName);
+
           lstFile.Add(outFileName);
         finally
           outFile.Free;
@@ -841,7 +828,6 @@ begin
   end;
 end;
 
-
 procedure unpackMFCQ(fileName: string; cb: TProgressCallback = nil);
 var
   chunks: TMFCQChunkArrays;
@@ -849,6 +835,5 @@ begin
   chunks := AnalyzeMFCQChunks(fileName);
   SaveMFCQChunksToFiles(fileName, chunks, cb);
 end;
-
 
 end.

@@ -125,7 +125,6 @@ type
   end;
   PBRMetrics = ^TBRMetrics;
 
-
 type
   TOSMetrics = packed record
     version: longword;
@@ -152,7 +151,7 @@ type
     Blocks: cardinal;
     unk4: cardinal;  // 1000
     unk5: cardinal;  // 1000011
-    Name: array[0..7] of char;// 0-terminated
+    Name: array[0..7] of char; // 0-terminated
     Serial: cardinal;
     unk6: cardinal;   // 91
     unk7: cardinal;   // 03
@@ -214,8 +213,6 @@ implementation
 uses Math, StrUtils, uMisc;
 
 const
-  SUPPORTED_OS_LIST_SIZE = 10;
-
   STP_PROTOCOL_TYPE_FACTORY_OS = 2;
   STP_PROTOCOL_TYPE_RMA_OS = 8;
   STP_PROTOCOL_TYPE_SHIPPING_OS = 16;
@@ -223,7 +220,6 @@ const
   STP_PROTOCOL_TYPE_UNTRUSTED_OS = 64;
 
 type
-
   TOSRangeAndType = packed record
     rangeStart: cardinal;
     rangeEnd: cardinal;
@@ -235,7 +231,7 @@ function HWVtoString(val: THVW): string;
 var
   Desc: string;
 begin
-  case val.id of
+  case val.ID of
     $01: Desc := 'Board Revision';
     $02: Desc := 'CPU Version';
     $03: Desc := 'SW Compatibility';
@@ -253,44 +249,30 @@ begin
       Desc := 'Unknown';
   end;
 
-  (*
-    Board Revision       0x01 - 0x0D
-    CPU Version          0x02 - 0x10
-    SW Compatibility     0x03 - 0x01
-    POP Revision         0x04 - 0x03
-    CPU Family           0x05 - 0x04
-    Power Mgt Hardware   0x07 - 0x5C
-    POP Security         0x0B - 0x01
-    BSIS support         0x41 - 0x02
-    WLAN FEM             0x45 - 0x0B
-    NFC                  0x49 - 0x87
-    MFG DDR Traceability 0x4F - 0x50
-    Keyboard Lang Var    0x55 - 0x30
-    WLAN chip            0x58 - 0x04
-  *)
-  Result := Format('%0:-21s0x%.2X - 0x%.2X', [Desc, val.ID, val.Val]);
+  Result := Format('%-21s 0x%.2X - 0x%.2X', [Desc, val.ID, val.Val]);
 end;
-
 
 { TConverter }
 
 class function TConverter.User2OS(const v: TFourInts): cardinal;
 begin
-  Result := (v[0] and 255) shl 24 or (v[1] and 31) shl 19 or (v[2] shr 2 and 7) shl
-    16 or (v[2] and 3) shl 13 or (v[3] and 8191);
+  Result := (cardinal(v[0]) shl 24) or ((cardinal(v[1]) and 31) shl 19) or
+    (((cardinal(v[2]) shr 2) and 7) shl 16) or ((cardinal(v[2]) and 3) shl 13) or
+    (cardinal(v[3]) and 8191);
 end;
 
 class function TConverter.OS2User(v: cardinal): TFourInts;
 begin
   Result[0] := (v shr 24) and 255;
   Result[1] := (v shr 19) and 31;
-  Result[2] := ((v shr 16) and 7) shl 2 or ((v shr 13) and 3);
+  Result[2] := (((v shr 16) and 7) shl 2) or ((v shr 13) and 3);
   Result[3] := v and 8191;
 end;
 
 class function TConverter.Rom2OS(const v: TFourInts): cardinal;
 begin
-  Result := (v[0] and 255) shl 24 or (v[1] and 255) shl 16 or (v[2] and 1) shl 15 or (v[3] and 32767);
+  Result := (cardinal(v[0]) shl 24) or (cardinal(v[1]) shl 16) or
+    ((cardinal(v[2]) and 1) shl 15) or (cardinal(v[3]) and 32767);
 end;
 
 class function TConverter.OS2Rom(v: cardinal): TFourInts;
@@ -301,27 +283,39 @@ begin
   Result[3] := v and 32767;
 end;
 
-
 function ReadSignatureFromBuffer(const Buffer: TBytes; Offset: integer;
   BlockSize, Ver, Cookie: int64): TSignature;
 var
-  p: integer;
+  p, MaxLen: integer;
 begin
   Result.BlockSize := BlockSize;
   Result.Ver := Ver;
   Result.Cookie := Cookie;
 
   p := Offset + 8;
+  if p + SizeOf(Result.keyname) + 8 > Length(Buffer) then
+  begin
+    Result.Len := 0;
+    Result.Sig := nil;
+    Exit;
+  end;
+
   Move(Buffer[p], Result.keyname[0], SizeOf(Result.keyname));
   Inc(p, SizeOf(Result.keyname));
 
   Result.keyID := PDWord(@Buffer[p])^;
   Result.Len := PDWord(@Buffer[p + 4])^;
+  Inc(p, 8);
 
   if Result.Len > 0 then
   begin
+    MaxLen := Length(Buffer) - p;
+    if integer(Result.Len) > MaxLen then
+      Result.Len := MaxLen;
+
     SetLength(Result.Sig, Result.Len);
-    Move(Buffer[p + 8], Result.Sig[0], Result.Len);
+    if Result.Len > 0 then
+      Move(Buffer[p], Result.Sig[0], Result.Len);
   end
   else
     Result.Sig := nil;
@@ -340,12 +334,13 @@ var
   i, Count: integer;
   found: boolean;
 begin
+  if Stream = nil then Exit(nil);
+
   savedp := Stream.Position;
   size := Stream.Size;
 
   if size < 12 then Exit(nil);
 
-  // Read last 40KB into buffer
   SetLength(Buffer, Min(BufferSize, size));
   Stream.Position := size - Length(Buffer);
   Stream.ReadBuffer(Buffer[0], Length(Buffer));
@@ -368,8 +363,8 @@ begin
     t2 := PDWord(@Buffer[i + 4])^;
     t3 := PDWord(@Buffer[i + 8])^;
 
-    if (t2 = xver) and (t1 > 0) and (t1 <= p) and ((t3 = Cookies[0]) or (t3 = Cookies[1]) or
-      (t3 = Cookies[2])) then
+    if (t2 = xver) and (t1 > 0) and (t1 <= p) and ((t3 = Cookies[0]) or
+      (t3 = Cookies[1]) or (t3 = Cookies[2])) then
     begin
       Dec(p, t1);
       i := p - (size - Length(Buffer));
@@ -395,10 +390,9 @@ procedure GenDummySig(var Buf: TBytes);
 begin
   if Length(Buf) <> 560 then
     SetLength(Buf, 560);
-  // Fill buffer with $FF
+
   FillChar(Buf[0], 560, $FF);
 
-  // Direct assignments (fastest for small number of patches)
   PLongWord(@Buf[$24])^ := $00000088;
   PLongWord(@Buf[$B0])^ := $000000BC;
   PLongWord(@Buf[$B4])^ := $00010001;
@@ -415,14 +409,11 @@ end;
 
 function EncodeVersion(major, minor, maint, build: word; isProd: boolean): cardinal;
 begin
-  Result := 0;
-  Result := Result or (major and $FF) shl 24;
-  Result := Result or (minor and $1F) shl 19;
-  Result := Result or ((maint shr 2) and $07) shl 16;
+  Result := (cardinal(major and $FF) shl 24) or (cardinal(minor and $1F) shl 19) or
+    (cardinal((maint shr 2) and $07) shl 16);
   if isProd then
     Result := Result or (1 shl 15);
-  Result := Result or (maint and $03) shl 13;
-  Result := Result or (build and $1FFF);
+  Result := Result or (cardinal(maint and $03) shl 13) or (cardinal(build and $1FFF));
 end;
 
 procedure DecodeVersion(Value: cardinal; out major, minor, maint, build: word; out isProd: boolean);
@@ -452,66 +443,75 @@ var
   parts: TStringArray;
   major, minor, maint, build: word;
   isProd: boolean;
+  spacePos: integer;
+  buildStr, prodStr: string;
 begin
-  parts := SplitString(s, '.');
+  parts := SplitString(Trim(s), '.');
   if Length(parts) < 4 then
-    raise Exception.Create('Invalid version string');
+    raise Exception.Create('Invalid version string format');
 
-  major := StrToInt(parts[0]);
-  minor := StrToInt(parts[1]);
-  maint := StrToInt(parts[2]);
+  major := StrToIntDef(parts[0], 0);
+  minor := StrToIntDef(parts[1], 0);
+  maint := StrToIntDef(parts[2], 0);
 
-  // parts[3] may be like "1281 DEV" or "1281 PROD"
-  if Pos(' ', parts[3]) > 0 then
+  buildStr := Trim(parts[3]);
+  spacePos := Pos(' ', buildStr);
+
+  if spacePos > 0 then
   begin
-    build := StrToInt(Copy(parts[3], 1, Pos(' ', parts[3]) - 1));
-    isProd := Trim(Copy(parts[3], Pos(' ', parts[3]) + 1, 10)) = 'PROD';
+    prodStr := UpperCase(Trim(Copy(buildStr, spacePos + 1, Length(buildStr))));
+    buildStr := Copy(buildStr, 1, spacePos - 1);
+    isProd := (prodStr = 'PROD');
   end
   else
-  begin
-    build := StrToInt(parts[3]);
     isProd := False;
-  end;
+
+  build := StrToIntDef(buildStr, 0);
 
   Result := EncodeVersion(major, minor, maint, build, isProd);
 end;
-
 
 function DecodeBlocked(buf: TBytes): TStringList;
 
   function DecodeOsType(ostype: cardinal): string;
   begin
-    Result := '';
     case (ostype and (STP_PROTOCOL_TYPE_UNTRUSTED_OS - 1)) of
-      STP_PROTOCOL_TYPE_FACTORY_OS:
-        Result := 'SFI';
-      STP_PROTOCOL_TYPE_SHIPPING_OS:
-        Result := 'MFI';
-      STP_PROTOCOL_TYPE_RAM_FACTORY_OS:
-        Result := 'RFA';
-      STP_PROTOCOL_TYPE_RMA_OS:
-        Result := 'RMA';
+      STP_PROTOCOL_TYPE_FACTORY_OS: Result := 'SFI';
+      STP_PROTOCOL_TYPE_SHIPPING_OS: Result := 'MFI';
+      STP_PROTOCOL_TYPE_RAM_FACTORY_OS: Result := 'RFA';
+      STP_PROTOCOL_TYPE_RMA_OS: Result := 'RMA';
       else
         Result := 'Unsupported';
     end;
+
     if (ostype and STP_PROTOCOL_TYPE_UNTRUSTED_OS) = STP_PROTOCOL_TYPE_UNTRUSTED_OS then
       Result := Result + ',Untrusted';
   end;
 
 var
-  i, c: integer;
+  i, c, RequiredSize: integer;
+  ItemPtr: POSRangeAndType;
 begin
-  if length(buf) = 0 then Exit(nil);
-  Result := TStringList.Create;
+  if Length(buf) < SizeOf(integer) then Exit(nil);
+
   c := PInteger(@buf[0])^;
-  for i := 0 to c - 1 do
-  begin
-    with POSRangeAndType(@buf[4 + i * SizeOf(TOSRangeAndType)])^ do
+  if c <= 0 then Exit(nil);
+
+  RequiredSize := SizeOf(integer) + c * SizeOf(TOSRangeAndType);
+  if Length(buf) < RequiredSize then Exit(nil);
+
+  Result := TStringList.Create;
+  try
+    for i := 0 to c - 1 do
     begin
-      Result.Add(Format('   range:              From %s To %s',
-        [VersionToString(rangeStart), VersionToString(rangeEnd)]));
-      Result.Add(Format('    type:              %s', [DecodeOsType(osTypeBitMask)]));
+      ItemPtr := POSRangeAndType(@buf[SizeOf(integer) + i * SizeOf(TOSRangeAndType)]);
+      Result.Add(Format('   range:             From %s To %s',
+        [VersionToString(ItemPtr^.rangeStart), VersionToString(ItemPtr^.rangeEnd)]));
+      Result.Add(Format('    type:             %s', [DecodeOsType(ItemPtr^.osTypeBitMask)]));
     end;
+  except
+    FreeAndNil(Result);
+    raise;
   end;
 end;
 
@@ -552,7 +552,6 @@ begin
       Result := 'Unknown';
   end;
 end;
-
 
 initialization
   GenDummySig(dummy_signature);

@@ -2,6 +2,7 @@ unit MCT;
 
 {$mode ObjFPC}{$H+}
 {$modeSwitch advancedRecords}
+
 interface
 
 uses
@@ -56,7 +57,7 @@ type
     ekBootrom = $18,
     ekMCT = $32,
     ekOSNV = $1E,
-    ekCalworking = $37,
+    ekCalWorking = $37,
     ekOSExt = $3B,
     ekCalBackup = $38,
     ekMBR = $34,
@@ -93,9 +94,9 @@ type
 
 function ParseMCTStream(Stream: TStream): TMCTParsed;
 procedure ExtractMCTPartitionsToFiles(Stream: TStream; const Parsed: TMCTParsed; const DestDir: string);
-procedure RunExtract(const DumpFile: string; const OutDir: string; offset: int64 = 0);
+procedure RunExtract(const DumpFile: string; const OutDir: string; Offset: int64 = 0);
 procedure ParseAndShowMCT(const FileName: string);
-procedure ShowParsedMCT(const Parsed: TMCTParsed; actual: boolean = False);
+procedure ShowParsedMCT(const Parsed: TMCTParsed; Actual: boolean = False);
 procedure ExtractMCTPartitionToStream(Stream: TStream; const Parsed: TMCTParsed;
   const Name: string; FileStream: TStream);
 
@@ -103,14 +104,27 @@ procedure FreeMCTParsed(var Parsed: TMCTParsed);
 
 implementation
 
-uses crc {$IFNDEF LCL},
-  CLI.Console{$ENDIF};       // Optional: Colored console output
+uses
+  crc
+  {$IFNDEF LCL}
+  , CLI.Console
+  {$ENDIF};
 
 const
   MCT_MAGIC = $92BE564A;
   MCT_MAJOR_VERSION = 1;
   BLOCK_SIZE = $10000;
   COPY_CHUNK = $10000;
+
+// Безпечне отримання назви партиції з нетермінованого 12-байтового масиву
+function GetPartitionName(const Part: TMCTPartition): string;
+var
+  Buffer: array[0..12] of char;
+begin
+  FillChar(Buffer, SizeOf(Buffer), 0);
+  Move(Part.Name[0], Buffer[0], SizeOf(Part.Name));
+  Result := Trim(StrPas(Buffer));
+end;
 
 function GetEntryKind(RawType: byte): TMCTEntryKind; inline;
 begin
@@ -131,7 +145,7 @@ begin
     $35: Result := ekQNXRegion;
     $39: Result := ekPartition;
     $26: Result := ekNANDConfig;
-    $23: Result := ekRamChip;
+    $23: Result := ekTag;
     $09: Result := ekCRC;
     $0B: Result := ekHVW;
     $1A: Result := ekRAMChip;
@@ -141,8 +155,7 @@ begin
   end;
 end;
 
-
-function GetEntryDesc(kind: TMCTEntryKind): string; inline;
+function GetEntryDesc(Kind: TMCTEntryKind): string; inline;
 begin
   case Kind of
     ekFlashChip: Result := 'Flash Chip';
@@ -164,11 +177,11 @@ begin
     ekCRC: Result := 'CRC';
     ekRAMChip: Result := 'RAM Chip';
     ekHVW: Result := 'HWV Entry';
+    ekTag: Result := 'Tag Entry';
     else
-      Result := '';
+      Result := 'Unknown';
   end;
 end;
-
 
 function TMCTEntry.AsFlashChip: TMCTFlashChip;
 begin
@@ -179,7 +192,7 @@ end;
 
 function TMCTEntry.AsPartition: TMCTPartition;
 begin
-  if Length(RawData) <> SizeOf(TMCTPartition) then
+  if Length(RawData) < SizeOf(TMCTPartition) then
     raise Exception.Create('Invalid Partition size');
   Move(RawData[0], Result, SizeOf(TMCTPartition));
 end;
@@ -214,7 +227,9 @@ var
   RawMem: TMemoryStream;
   Entry: TMCTEntry;
 begin
-  if Stream.Size < SizeOf(Hdr) then
+  FillChar(Result, SizeOf(Result), 0);
+
+  if (Stream.Size - Stream.Position) < SizeOf(Hdr) then
     raise Exception.Create('Too small for MCT header');
 
   Stream.ReadBuffer(Hdr, SizeOf(Hdr));
@@ -232,10 +247,11 @@ begin
     Cap := 16;
     SetLength(Result.Entries, Cap);
 
-    while Stream.Position + 2 <= Stream.Size do
+    while (Stream.Position + 2) <= Stream.Size do
     begin
       Stream.ReadBuffer(T, 1);
       Stream.ReadBuffer(L, 1);
+
       Entry.Kind := GetEntryKind(T);
       if Entry.Kind = ekEnd then Break;
 
@@ -251,7 +267,7 @@ begin
 
       Entry.RawData := Buf;
 
-      if EntryCount = Cap then
+      if EntryCount >= Cap then
       begin
         Cap := Cap + 16;
         SetLength(Result.Entries, Cap);
@@ -264,10 +280,8 @@ begin
       begin
         if Length(Buf) < 6 then raise Exception.Create('CRC block too short');
         Result.CRC := PLongWord(@Buf[2])^;
-        //Result.ActualCRC := CalcCRC32(RawMem.Memory^, RawMem.Size - L);
         Result.ActualCRC := crc32(0, RawMem.Memory, RawMem.Size - L);
       end;
-
     end;
 
     SetLength(Result.Entries, EntryCount);
@@ -276,14 +290,14 @@ begin
   end;
 end;
 
-procedure ShowParsedMCT(const Parsed: TMCTParsed; actual: boolean = False);
+procedure ShowParsedMCT(const Parsed: TMCTParsed; Actual: boolean = False);
 
-  function BlocksToStr(Entry: TMCTRange): string;
+  function BlocksToStr(const Entry: TMCTRange): string;
   begin
     Result := Format('blocks %d-%d', [Entry.StartBlock, Entry.EndBlock]);
   end;
 
-  function BlocksToStrTotal(Entry: TMCTRange): string;
+  function BlocksToStrTotal(const Entry: TMCTRange): string;
   begin
     Result := Format('blocks %d-%d, total: %d', [Entry.StartBlock, Entry.EndBlock,
       Entry.EndBlock - Entry.StartBlock + 1]);
@@ -293,48 +307,64 @@ var
   i: integer;
   E: TMCTEntry;
   K: TMCTEntryKind;
-  s, desc, res: string;
+  S, Desc, Res: string;
 begin
   {$IFNDEF LCL}
-  s := '';
-  if actual then
-    s := ' (actual)';
-  TConsole.WriteLn(Format('  Mem Config Table (ver %d.%d)%s:', [Parsed.Major, Parsed.Minor, s]));
+  S := '';
+  if Actual then S := ' (actual)';
+  TConsole.WriteLn(Format('  Mem Config Table (ver %d.%d)%s:', [Parsed.Major, Parsed.Minor, S]));
+
   for i := 0 to High(Parsed.Entries) do
   begin
     E := Parsed.Entries[i];
     K := E.Kind;
-    desc := GetEntryDesc(K);
-    case K of
-      ekFlashChip: with E.AsFlashChip do
-          res := Format('%s, Chip %d, Sub %d', [BlocksToStr(Range), Chip, Sub]);
-      ekBoot0, ekUser: with E.AsBlockWithFlags do
-          res := Format('%s, flags = 0x%.4x', [BlocksToStrTotal(Range), Flags]);
-      ekBootrom, ekOSExt, ekMBR, ekOSFixed, ekRadioFixed: with E.AsBlockWithDummy do
-          res := BlocksToStr(Range);
-      ekOSNV, ekCalBackup, ekFSFixed: with E.AsBlockWithDummy do
-          res := BlocksToStrTotal(Range);
-      ekQNXRegion: with E.AsQNXRegion do
-        begin
-          res := BlocksToStrTotal(Range);
-          desc := desc + ' ' + IntToStr(ID);
-        end;
-      ekPartition: with E.AsPartition do
-          res := Format('type=0x%.2x:%.2x, %s, "%s"', [PartitionID, Flags,
-            BlocksToStrTotal(Range), PChar(Name)]);
-      ekNANDConfig: with E.AsBlockWithDummy do
-          res := Format('type %d, data 0x%.8X 0x%.8X', [Dummy, int64(Range.StartBlock),
-            int64(Range.EndBlock)]);
-      ekRAMChip: with E.AsBlockWithDummy do
-          res := Format('0x%.8X-0x%.8X, Bank Size %d', [Dummy, int64(Range.StartBlock),
-            int64(Range.EndBlock), int64(Range.EndBlock - Range.StartBlock + 1)]);
-      ekMCT: res := Format('block %d', [PDword(@E.RawData[2])^]);
-      ekCRC: res := Format('0x%.8X', [int64(PDword(@E.RawData[2])^)]);
-      ekHVW: res := Format('0x%.2X - 0x%.2X', [E.RawData[0], E.RawData[1]]);
-    end;
-    desc := desc + ':';
+    Desc := GetEntryDesc(K);
+    Res := '';
 
-    TConsole.WriteLn(Format('    %0:-20s%s', [desc, res]));
+    case K of
+      ekFlashChip:
+        with E.AsFlashChip do
+          Res := Format('%s, Chip %d, Sub %d', [BlocksToStr(Range), Chip, Sub]);
+      ekBoot0, ekUser:
+        with E.AsBlockWithFlags do
+          Res := Format('%s, flags = 0x%.4x', [BlocksToStrTotal(Range), Flags]);
+      ekBootrom, ekOSExt, ekMBR, ekOSFixed, ekRadioFixed:
+        with E.AsBlockWithDummy do
+          Res := BlocksToStr(Range);
+      ekOSNV, ekCalBackup, ekFSFixed:
+        with E.AsBlockWithDummy do
+          Res := BlocksToStrTotal(Range);
+      ekQNXRegion:
+        with E.AsQNXRegion do
+        begin
+          Res := BlocksToStrTotal(Range);
+          Desc := Desc + ' ' + IntToStr(ID);
+        end;
+      ekPartition:
+        with E.AsPartition do
+          Res := Format('type=0x%.2x:%.2x, %s, "%s"', [PartitionID, Flags,
+            BlocksToStrTotal(Range), GetPartitionName(E.AsPartition)]);
+      ekNANDConfig:
+        with E.AsBlockWithDummy do
+          Res := Format('type %d, data 0x%.8X 0x%.8X', [Dummy, int64(Range.StartBlock),
+            int64(Range.EndBlock)]);
+      ekRAMChip:
+        with E.AsBlockWithDummy do
+          Res := Format('0x%.8X-0x%.8X, Bank Size %d', [Dummy, int64(Range.StartBlock),
+            int64(Range.EndBlock), int64(Range.EndBlock - Range.StartBlock + 1)]);
+      ekMCT:
+        if Length(E.RawData) >= 6 then
+          Res := Format('block %d', [PDWord(@E.RawData[2])^]);
+      ekCRC:
+        if Length(E.RawData) >= 6 then
+          Res := Format('0x%.8X', [int64(PDWord(@E.RawData[2])^)]);
+      ekHVW:
+        if Length(E.RawData) >= 2 then
+          Res := Format('0x%.2X - 0x%.2X', [E.RawData[0], E.RawData[1]]);
+    end;
+
+    Desc := Desc + ':';
+    TConsole.WriteLn(Format('    %-20s%s', [Desc, Res]));
   end;
   {$ENDIF}
 end;
@@ -344,7 +374,7 @@ var
   FS: TFileStream;
   Parsed: TMCTParsed;
 begin
-  FS := TFileStream.Create(FileName, fmOpenRead);
+  FS := TFileStream.Create(FileName, fmOpenRead or fmShareDenyWrite);
   try
     Parsed := ParseMCTStream(FS);
     try
@@ -360,39 +390,42 @@ end;
 procedure ExtractMCTPartitionsToFiles(Stream: TStream; const Parsed: TMCTParsed; const DestDir: string);
 var
   BaseAddr, NvramOffset: QWord;
-  i, Count: integer;
+  i, CountIdx, CountVal: integer;
   E: TMCTEntry;
   FileName, BaseName, Key: string;
   FileStream: TFileStream;
   PartOffset, PartSize, PartEnd: QWord;
-  StreamMaxOffset, MaxReadable: QWord;
-  AvailableSize, Remaining, ChunkSize: QWord;
-  Buffer: array of byte;
+  StreamMaxOffset, MaxReadable, AvailableSize, Remaining, ChunkSize: QWord;
+  Buffer: TBytes;
   FoundNVRAM: boolean;
   NameMap: TStringList;
-  partition: TMCTPartition;
+  Partition: TMCTPartition;
 begin
   FoundNVRAM := False;
+  BaseAddr := 0;
 
-  // 1. Find base address from 'nvram' partition
+  // 1. Пошук базової адреси за партицією 'nvram'
   for i := 0 to High(Parsed.Entries) do
   begin
     E := Parsed.Entries[i];
     if E.Kind = ekPartition then
-      partition := E.AsPartition;
-    if SameText(Trim(PChar(Partition.Name)), 'nvram') then
     begin
-      NvramOffset := QWord(Partition.Range.StartBlock) * BLOCK_SIZE;
-      BaseAddr := NvramOffset - BLOCK_SIZE;
-      FoundNVRAM := True;
-      Break;
+      Partition := E.AsPartition;
+      if SameText(GetPartitionName(Partition), 'nvram') then
+      begin
+        NvramOffset := QWord(Partition.Range.StartBlock) * BLOCK_SIZE;
+        BaseAddr := NvramOffset - BLOCK_SIZE;
+        FoundNVRAM := True;
+        Break;
+      end;
     end;
   end;
 
   if not FoundNVRAM then
     raise Exception.Create('Partition "nvram" not found. Cannot determine base address');
+
   {$IFNDEF LCL}
-  Writeln(Format('[i] NVRAM offset = $%.8x → BaseAddr = $%.8x', [NvramOffset, BaseAddr]));
+  WriteLn(Format('[i] NVRAM offset = $%.8x -> BaseAddr = $%.8x', [NvramOffset, BaseAddr]));
   {$ENDIF}
 
   StreamMaxOffset := BaseAddr + Stream.Size;
@@ -405,9 +438,9 @@ begin
     for i := 0 to High(Parsed.Entries) do
     begin
       E := Parsed.Entries[i];
-      if E.Kind <> ekPartition then
-        continue;
-      partition := E.AsPartition;
+      if E.Kind <> ekPartition then Continue;
+
+      Partition := E.AsPartition;
       PartOffset := QWord(Partition.Range.StartBlock) * BLOCK_SIZE;
       PartEnd := QWord(Partition.Range.EndBlock + 1) * BLOCK_SIZE;
       PartSize := PartEnd - PartOffset;
@@ -415,34 +448,32 @@ begin
       if PartOffset < BaseAddr then
       begin
         {$IFNDEF LCL}
-        Writeln(Format('[!] Partition "%s" is before base address. Skipping.',
-          [PChar(Partition.Name)]));
+        WriteLn(Format('[!] Partition "%s" is before base address. Skipping.',
+          [GetPartitionName(Partition)]));
         {$ENDIF}
-        continue;
+        Continue;
       end;
 
       MaxReadable := StreamMaxOffset;
       if PartEnd > MaxReadable then
       begin
         AvailableSize := MaxReadable - PartOffset;
-        Writeln(Format('[!] Partition "%s" is partially readable: only $%.x bytes available',
-          [PChar(Partition.Name), AvailableSize]));
+        {$IFNDEF LCL}
+        WriteLn(Format('[!] Partition "%s" is partially readable: only $%.x bytes available',
+          [GetPartitionName(Partition), AvailableSize]));
+        {$ENDIF}
       end
       else
         AvailableSize := PartSize;
 
-      if AvailableSize = 0 then
-      begin
-        Writeln(Format('[!] Partition "%s" has no readable data. Skipping.',
-          [PChar(Partition.Name)]));
-        continue;
-      end;
+      if AvailableSize = 0 then Continue;
 
-      // Унікалізуємо ім’я
-      BaseName := Trim(PChar(Partition.Name));
+      // Генеруємо унікальну назву файлу
+      BaseName := GetPartitionName(Partition);
       Key := LowerCase(BaseName);
-      Count := NameMap.IndexOf(Key);
-      if Count = -1 then
+      CountIdx := NameMap.IndexOf(Key);
+
+      if CountIdx = -1 then
       begin
         NameMap.AddObject(Key, TObject(PtrUInt(1)));
         FileName := Format('%s%2.2x_%s.bin', [IncludeTrailingPathDelimiter(DestDir),
@@ -450,15 +481,16 @@ begin
       end
       else
       begin
-        Count := PtrUInt(NameMap.Objects[NameMap.IndexOf(Key)]);
-        Inc(Count);
-        NameMap.Objects[NameMap.IndexOf(Key)] := TObject(PtrUInt(Count));
+        CountVal := PtrUInt(NameMap.Objects[CountIdx]) + 1;
+        NameMap.Objects[CountIdx] := TObject(PtrUInt(CountVal));
         FileName := Format('%s%2.2x_%s_%d.bin', [IncludeTrailingPathDelimiter(DestDir),
-          Partition.PartitionID, BaseName, Count]);
+          Partition.PartitionID, BaseName, CountVal]);
       end;
+
       {$IFNDEF LCL}
-      Writeln(Format('[+] Saving "%s" → %s (%.x bytes)', [BaseName, FileName, AvailableSize]));
+      WriteLn(Format('[+] Saving "%s" -> %s (%.x bytes)', [BaseName, FileName, AvailableSize]));
       {$ENDIF}
+
       Stream.Position := PartOffset - BaseAddr;
       FileStream := TFileStream.Create(FileName, fmCreate);
       try
@@ -466,8 +498,7 @@ begin
         while Remaining > 0 do
         begin
           ChunkSize := COPY_CHUNK;
-          if Remaining < ChunkSize then
-            ChunkSize := Remaining;
+          if Remaining < ChunkSize then ChunkSize := Remaining;
 
           Stream.ReadBuffer(Buffer[0], ChunkSize);
           FileStream.WriteBuffer(Buffer[0], ChunkSize);
@@ -483,30 +514,25 @@ begin
   end;
 end;
 
-
 procedure FreeMCTParsed(var Parsed: TMCTParsed);
 var
   i: integer;
 begin
   for i := 0 to High(Parsed.Entries) do
-  begin
     SetLength(Parsed.Entries[i].RawData, 0);
-    Parsed.Entries[i].RawData := nil;
-  end;
   SetLength(Parsed.Entries, 0);
 end;
 
-procedure RunExtract(const DumpFile: string; const OutDir: string; offset: int64 = 0);
+procedure RunExtract(const DumpFile: string; const OutDir: string; Offset: int64 = 0);
 var
   FS: TFileStream;
   Parsed: TMCTParsed;
 begin
-  FS := TFileStream.Create(DumpFile, fmOpenRead);
+  FS := TFileStream.Create(DumpFile, fmOpenRead or fmShareDenyWrite);
   try
-    if FS.Size > offset then
+    if FS.Size > Offset then
     begin
-
-      FS.Position := offset;
+      FS.Position := Offset;
       Parsed := ParseMCTStream(FS);
       try
         ShowParsedMCT(Parsed);
@@ -518,6 +544,8 @@ begin
     {$IFNDEF LCL}
     else
       TConsole.WriteLn('Bad MCT offset!', ccRed);
+    {$ELSE}
+    ;
     {$ENDIF}
   finally
     FS.Free;
@@ -528,30 +556,30 @@ procedure ExtractMCTPartitionToStream(Stream: TStream; const Parsed: TMCTParsed;
   const Name: string; FileStream: TStream);
 var
   BaseAddr, NvramOffset: QWord;
-  i, Count: integer;
+  i: integer;
   E: TMCTEntry;
-  FileName, BaseName, Key: string;
   PartOffset, PartSize, PartEnd: QWord;
-  StreamMaxOffset, MaxReadable: QWord;
-  AvailableSize, Remaining, ChunkSize: QWord;
-  Buffer: array of byte;
+  StreamMaxOffset, AvailableSize, Remaining, ChunkSize: QWord;
+  Buffer: TBytes;
   FoundNVRAM: boolean;
-  partition: TMCTPartition;
+  Partition: TMCTPartition;
 begin
   FoundNVRAM := False;
+  BaseAddr := 0;
 
-  // 1. Find base address from 'nvram' partition
   for i := 0 to High(Parsed.Entries) do
   begin
     E := Parsed.Entries[i];
     if E.Kind = ekPartition then
-      partition := E.AsPartition;
-    if SameText(Trim(PChar(Partition.Name)), 'nvram') then
     begin
-      NvramOffset := QWord(Partition.Range.StartBlock) * BLOCK_SIZE;
-      BaseAddr := NvramOffset - BLOCK_SIZE;
-      FoundNVRAM := True;
-      Break;
+      Partition := E.AsPartition;
+      if SameText(GetPartitionName(Partition), 'nvram') then
+      begin
+        NvramOffset := QWord(Partition.Range.StartBlock) * BLOCK_SIZE;
+        BaseAddr := NvramOffset - BLOCK_SIZE;
+        FoundNVRAM := True;
+        Break;
+      end;
     end;
   end;
 
@@ -565,33 +593,32 @@ begin
     for i := 0 to High(Parsed.Entries) do
     begin
       E := Parsed.Entries[i];
-      if (E.Kind <> ekPartition) then continue;
-      partition := E.AsPartition;
-      if not SameText(Trim(PChar(Partition.Name)), Name) then continue;
+      if E.Kind <> ekPartition then Continue;
+
+      Partition := E.AsPartition;
+      if not SameText(GetPartitionName(Partition), Name) then Continue;
 
       PartOffset := QWord(Partition.Range.StartBlock) * BLOCK_SIZE;
       PartEnd := QWord(Partition.Range.EndBlock + 1) * BLOCK_SIZE;
       PartSize := PartEnd - PartOffset;
 
-      if PartOffset < BaseAddr then
-        continue;
+      if PartOffset < BaseAddr then Continue;
 
-      MaxReadable := StreamMaxOffset;
-      if PartEnd > MaxReadable then
-        AvailableSize := MaxReadable - PartOffset
+      if PartEnd > StreamMaxOffset then
+        AvailableSize := StreamMaxOffset - PartOffset
       else
         AvailableSize := PartSize;
 
-      if AvailableSize = 0 then  continue;
+      if AvailableSize = 0 then Continue;
 
       Stream.Position := PartOffset - BaseAddr;
       FileStream.Size := 0;
       Remaining := AvailableSize;
+
       while Remaining > 0 do
       begin
         ChunkSize := COPY_CHUNK;
-        if Remaining < ChunkSize then
-          ChunkSize := Remaining;
+        if Remaining < ChunkSize then ChunkSize := Remaining;
 
         Stream.ReadBuffer(Buffer[0], ChunkSize);
         FileStream.WriteBuffer(Buffer[0], ChunkSize);
@@ -602,6 +629,5 @@ begin
     SetLength(Buffer, 0);
   end;
 end;
-
 
 end.

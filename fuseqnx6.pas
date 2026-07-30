@@ -9,10 +9,9 @@ uses
 
 procedure QNX6Mount(fileName, mountpoint: string; fg: boolean = False; dbg: boolean = False);
 
-
 implementation
 
-uses BaseUnix, fuse, qnx6, Math;
+uses BaseUnix, fuse, qnx6, Math, qnx6.types;
 
 var
   FS: TQNX6Fs;
@@ -38,14 +37,9 @@ begin
       st_nlink := inode.nlink;
     end;
   end;
-
 end;
 
-{ Get file attributes.
-
-  Similar to stat(). The 'st_dev' and 'st_blksize' fields are ignored.
-  The 'st_ino' field is ignored except if the 'use_ino' mount option is given.
-}
+{ Get file attributes }
 function qnx6_getattr(const aName: pchar; var aStat: TStat): cint; cdecl;
 var
   idx: integer;
@@ -58,17 +52,9 @@ begin
   end
   else
     Result := -ESysENOENT;
-
 end;
 
-
-{ Read the target of a symbolic link
-
-  The buffer should be filled with a null terminated string. The buffer size
-  argument includes the space for the terminating null character. If the
-  linkname is too long to fit in the buffer, it should be truncated.
-  The return value should be 0 for success.
-}
+{ Read the target of a symbolic link }
 function qnx6_readlink(const aName: pchar; aLinksToName: pchar; aLinksToNameSize: TSize): cint; cdecl;
 var
   idx: integer;
@@ -86,12 +72,18 @@ begin
       l := FS.Inodes[idx].size;
       c := FS.BlockSize + q;
       SetLength(Buff, c);
-      move(MP[1], buff[0], q);
-      FS.ReadBlock(blk, @buff[q]);
-      s := min(aLinksToNameSize - 1, q + l);
-      move(buff[0], aLinksToName^, s);
-      aLinksToName[s] := #0;
+      FillChar(Buff[0], c, 0);
 
+      if q > 0 then
+        Move(MP[1], Buff[0], q);
+
+      FS.ReadBlock(blk, @Buff[q]);
+
+      s := Min(aLinksToNameSize - 1, q + l);
+      if s > 0 then
+        Move(Buff[0], aLinksToName^, s);
+
+      aLinksToName[s] := #0;
       Result := 0;
     end
     else
@@ -99,33 +91,20 @@ begin
   end
   else
     Result := -ESysENOENT;
-
 end;
 
-
-{ Create a file node
-
-  This is called for creation of all non-directory, non-symlink nodes.If the
-  filesystem defines a create() method, then for regular files that will be
-  called instead
-}
+{ Create a file node }
 function qnx6_mknod(const aName: pchar; aMode: TMode; aDevice: TDev): cint; cdecl;
 begin
-
+  Result := 0;
 end;
 
-{ Create a directory
-
-  Note that the mode argument may not have the type specification bits set,
-  i.e. S_ISDIR(mode) can be false. To obtain the correct directory type bits
-  use  mode|S_IFDIR
-}
+{ Create a directory }
 function qnx6_mkdir(const aDirectoryName: pchar; aMode: TMode): cint; cdecl;
 begin
   Result := FS.MkDir(aDirectoryName, S_IFDIR or aMode);
   if Result > 0 then Result := 0;
 end;
-
 
 { Remove a file }
 function qnx6_unlink(const aName: pchar): cint; cdecl;
@@ -142,12 +121,12 @@ end;
 { Create a symbolic link }
 function qnx6_symlink(const aLinksToName, aName: pchar): cint; cdecl;
 var
-  s: utf8string;
-  c, l: integer;
+  s: string;
+  l: integer;
 begin
   s := ExpandFileName(aLinksToName);
-  l := length(MP);
-  if Copy(s, 1, l) = MP then
+  l := Length(MP);
+  if (l > 0) and (Copy(s, 1, l) = MP) then
     Delete(s, 1, l);
   Result := FS.symlink(PChar(s), aName);
 end;
@@ -180,7 +159,6 @@ begin
   end
   else
     Result := -ESysENOENT;
-
 end;
 
 { Change the owner and group of a file }
@@ -200,7 +178,6 @@ begin
   end
   else
     Result := -ESysENOENT;
-
 end;
 
 { Change the size of a file }
@@ -212,28 +189,10 @@ begin
   if idx < 1 then
     Result := -ESysENOENT
   else
-  begin
     Result := FS.SetSize(idx, aNewSize);
-
-  end;
-
 end;
 
-{ File open operation
-
-  No creation (O_CREAT, O_EXCL) and by default also no truncation (O_TRUNC)
-  flags will be passed to open(). If an application specifies O_TRUNC, fuse
-  first calls truncate() and then open(). Only if 'atomic_o_trunc' has been
-  specified and kernel version is 2.6.24 or later, O_TRUNC is passed on to
-  open.
-
-  Unless the 'default_permissions' mount option is given, open should check
-  if the operation is permitted for the given flags. Optionally open may
-  also return an arbitrary filehandle in the fuse_file_info structure, which
-  will be passed to all file operations.
-
-  Changed in version 2.2
-}
+{ File open operation }
 function qnx6_open(const aName: pchar; aFileInfo: PFuseFileInfo): cint; cdecl;
 var
   idx: integer;
@@ -243,121 +202,99 @@ begin
     Result := -ESysENOENT
   else
     Result := 0;
-
 end;
 
-{ Read data from an open file
-
-  Read should return exactly the number of bytes requested except on EOF or
-  error, otherwise the rest of the data will be substituted with zeroes. An
-  exception to this is when the 'direct_io' mount option is specified, in
-  which case the return value of the read system call will reflect the
-  return value of this operation.
-
-  Changed in version 2.2
-}
+{ Read data from an open file }
 function qnx6_read(const aName: pchar; aBuffer: pointer; aBufferSize: TSize;
   aFileOffset: TOff; aFileInfo: PFuseFileInfo): cint; cdecl;
 var
-  idx, s, c, i, i1, i2: integer;
-  buff: array of byte;
+  idx, c, i, i1, i2, numBlocks: integer;
+  Buff: array of byte;
   Blocks: TBlocksList;
   fsize: qword;
 begin
   idx := FS.GetInodeByPath(aName);
   if idx < 1 then
-    Result := -ESysENOENT
-  else
+    Exit(-ESysENOENT);
+
+  fsize := FS.Inodes[idx].size;
+  if aFileOffset >= fsize then
+    Exit(0);
+
+  FS.InodeMgr.LoadInodeBlocks(idx, Blocks);
+
+  i1 := aFileOffset div FS.BlockSize;
+  i2 := (aFileOffset + aBufferSize - 1) div FS.BlockSize + 1;
+  numBlocks := i2 - i1;
+
+  SetLength(Buff, numBlocks * FS.BlockSize);
+  FillChar(Buff[0], Length(Buff), 0);
+
+  for i := 0 to numBlocks - 1 do
   begin
-    fsize := FS.Inodes[idx].size;
-    if aFileOffset >= fsize then
-    begin
-      Result := 0;
-      exit;
-    end;
-
-    FS.LoadInodeBlocks(idx, Blocks);
-    i1 := aFileOffset div FS.BlockSize;
-    i2 := (aFileOffset + aBufferSize) div FS.BlockSize;
-    if (aFileOffset + aBufferSize) and (FS.BlockSize - 1) <> 0 then
-      Inc(i2);
-
-    SetLength(Buff, ((i2 - i1)) * FS.BlockSize);
-
-    for i := i1 to pred(i2) do
-      FS.ReadBlock(Blocks.level[0].Data[i], @Buff[(i - i1) * FS.BlockSize]);
-
-    c := min(int64(aBufferSize), int64(fsize - aFileOffset));
-    move((@buff[aFileOffset mod FS.BlockSize])^, aBuffer^, c);
-    Result := c;
+    if (i1 + i) < Blocks.level[0].Count then
+      FS.ReadBlock(Blocks.level[0].Data[i1 + i], @Buff[i * FS.BlockSize]);
   end;
+
+  c := Min(int64(aBufferSize), int64(fsize - aFileOffset));
+  if c > 0 then
+    Move(Buff[aFileOffset mod FS.BlockSize], aBuffer^, c);
+
+  Result := c;
 end;
 
-{ Write data to an open file
-
-  Write should return exactly the number of bytes requested except on error.
-  An exception to this is when the 'direct_io' mount option is specified
-  (see read operation).
-
-  Changed in version 2.2
-}
+{ Write data to an open file }
 function qnx6_write(const aName: pchar; const aBuffer: Pointer; aBufferSize: TSize;
   aFileOffset: TOff; aFileInfo: PFuseFileInfo): cint; cdecl;
 var
-  idx, s, c, i, i1, i2: integer;
-  buff: array of byte;
+  idx, c, i, i1, i2, numBlocks: integer;
+  Buff: array of byte;
   Blocks: TBlocksList;
   fsize: qword;
 begin
   idx := FS.GetInodeByPath(aName);
   if idx < 1 then
-    Result := -ESysENOENT
-  else
+    Exit(-ESysENOENT);
+
+  fsize := FS.Inodes[idx].size;
+  if (aFileOffset + aBufferSize) > fsize then
   begin
-
-    fsize := FS.Inodes[idx].size;
-    if aFileOffset + aBufferSize >= fsize then
-    begin
-      // Enlarge file
-      Result := FS.SetSize(idx, aFileOffset + aBufferSize);
-
-      if Result < 0 then exit;
-      fsize := aFileOffset + aBufferSize;
-    end;
-
-    FS.LoadInodeBlocks(idx, Blocks);
-
-    i1 := aFileOffset div FS.BlockSize;
-    i2 := (aFileOffset + aBufferSize) div FS.BlockSize;
-    if (aFileOffset + aBufferSize) and (FS.BlockSize - 1) <> 0 then
-      Inc(i2);
-
-    SetLength(Buff, ((i2 - i1)) * FS.BlockSize);
-
-    if Blocks.level[0].Count > 0 then
-      for i := i1 to pred(i2) do
-        FS.ReadBlock(Blocks.level[0].Data[i], @Buff[(i - i1) * FS.BlockSize]);
-
-    c := min(int64(aBufferSize), int64(fsize - aFileOffset));
-    move(aBuffer^, (@buff[aFileOffset mod FS.BlockSize])^, c);
-
-    for i := i1 to pred(i2) do
-      FS.WriteBlock(Blocks.level[0].Data[i], @Buff[(i - i1) * FS.BlockSize]);
-
-    Result := c;
+    Result := FS.SetSize(idx, aFileOffset + aBufferSize);
+    if Result < 0 then Exit;
+    fsize := aFileOffset + aBufferSize;
   end;
 
+  FS.InodeMgr.LoadInodeBlocks(idx, Blocks);
+
+  i1 := aFileOffset div FS.BlockSize;
+  i2 := (aFileOffset + aBufferSize - 1) div FS.BlockSize + 1;
+  numBlocks := i2 - i1;
+
+  SetLength(Buff, numBlocks * FS.BlockSize);
+  FillChar(Buff[0], Length(Buff), 0);
+
+  for i := 0 to numBlocks - 1 do
+  begin
+    if (i1 + i) < Blocks.level[0].Count then
+      FS.ReadBlock(Blocks.level[0].Data[i1 + i], @Buff[i * FS.BlockSize]);
+  end;
+
+  c := Min(int64(aBufferSize), int64(fsize - aFileOffset));
+  if c > 0 then
+    Move(aBuffer^, Buff[aFileOffset mod FS.BlockSize], c);
+
+  for i := 0 to numBlocks - 1 do
+  begin
+    if (i1 + i) < Blocks.level[0].Count then
+      FS.WriteBlock(Blocks.level[0].Data[i1 + i], @Buff[i * FS.BlockSize]);
+  end;
+
+  Result := c;
 end;
 
-{ Get file system statistics
-
-  The 'f_frsize', 'f_favail', 'f_fsid' and 'f_flag' fields are ignored
-
-  Replaced 'struct statfs' parameter with 'struct statvfs' in version 2.5
-}
+{ Get file system statistics }
 function qnx6_statfs(const aName: pchar; aStatVFS: PStatVFS): cint; cdecl;
 begin
-
   aStatVFS^.f_bsize := FS.BlockSize;
   aStatVFS^.f_frsize := FS.BlockSize;
   aStatVFS^.f_blocks := FS.GetBlockCount;
@@ -371,292 +308,137 @@ begin
   Result := 0;
 end;
 
-{ Possibly flush cached data
-
-  BIG NOTE: This is not equivalent to fsync(). It's not a request to sync
-  dirty data.
-
-  Flush is called on each close() of a file descriptor. So if a filesystem
-  wants to return write errors in close() and the file has cached dirty
-  data, this is a good place to write back data and return any errors. Since
-  many applications ignore close() errors this is not always useful.
-
-  NOTE: The flush() method may be called more than once for each open().
-  This happens if more than one file descriptor refers to an opened file due
-  to dup(), dup2() or fork() calls. It is not possible to determine if a
-  flush is final, so each flush should be treated equally.  Multiple
-  write-flush sequences are relatively rare, so this shouldn't be a problem.
-
-  Filesystems shouldn't assume that flush will always be called after some
-  writes, or that if will be called at all.
-
-  Changed in version 2.2
-}
+{ Flush cached data }
 function qnx6_flush(const aName: pchar; aFileInfo: PFuseFileInfo): cint; cdecl;
 begin
   FS.Flush;
   Result := 0;
 end;
 
-{ Release an open file
-
-  Release is called when there are no more references to an open file: all
-  file descriptors are closed and all memory mappings are unmapped.
-
-  For every open() call there will be exactly one release() call with the
-  same flags and file descriptor. It is possible to have a file opened more
-  than once, in which case only the last release will mean, that no more
-  reads/writes will happen on the file. The return value of release is
-  ignored.
-
-  Changed in version 2.2
-}
+{ Release an open file }
 function qnx6_release(const aName: pchar; aFileInfo: PFuseFileInfo): cint; cdecl;
 begin
-
+  Result := 0;
 end;
 
-{ Synchronize file contents
-
-  If the datasync parameter is non-zero, then only the user data should be
-  flushed, not the meta data.
-
-  Changed in version 2.2
-}
+{ Synchronize file contents }
 function qnx6_fsync(const aName: pchar; aDataSync: cint; aFileInfo: PFuseFileInfo): cint; cdecl;
 begin
   FS.Flush;
   Result := 0;
 end;
 
-{ Set Extended Attributes }
+{ Extended Attributes Stubs }
 function qnx6_setxattr(const aName, aKey, aValue: pchar; aValueSize: TSize; Flags: cint): cint; cdecl;
 begin
-
+  Result := 0;
 end;
 
-{ Get Extended Attributes }
 function qnx6_getxattr(const aName, aKey: pchar; aValue: pchar; aValueSize: TSize): cint; cdecl;
 begin
-
+  Result := 0;
 end;
 
-{ List Extended Attributes }
 function qnx6_listxattr(const aName: pchar; aList: pchar; aListSize: TSize): cint; cdecl;
 begin
-
+  Result := 0;
 end;
 
-{ Remove Extended Attributes }
 function qnx6_removexattr(const aName, aKey: pchar): cint; cdecl;
 begin
-
+  Result := 0;
 end;
 
-{ Open directory
-
-  Unless the 'default_permissions' mount option is given, this method should
-  check if opendir is permitted for this directory. Optionally opendir may
-  also return an arbitrary filehandle in the fuse_file_info structure, which
-  will be passed to readdir, closedir and fsyncdir.
-
-  Introduced in version 2.3
-}
+{ Open directory }
 function qnx6_opendir(const aName: pchar; aFileInfo: PFuseFileInfo): cint; cdecl;
 begin
-
+  Result := 0;
 end;
 
-
-{ Read directory
-
-  This supersedes the old getdir() interface. New applications should use
-  this.
-
-  The filesystem may choose between two modes of operation:
-
-  1) The readdir implementation ignores the offset parameter, and passes
-  zero to the filler function's offset.  The filler function will not
-  return '1' (unless an error happens), so the whole directory is read in a
-  single readdir operation.  This works just like the old getdir() method.
-
-  2) The readdir implementation keeps track of the offsets of the directory
-  entries. It uses the offset parameter and always passes non-zero offset to
-  the filler function. When the buffer is full (or an error happens) the
-  filler function will return '1'.
-
-  Introduced in version 2.3
-}
+{ Read directory }
 function qnx6_readdir(const aName: pchar; aBuffer: pointer; aFillDirFunc: TFuseFillDir;
   aFileOffset: TOff; aFileInfo: PFuseFileInfo): cint; cdecl;
 var
-  i, c, idx: integer;
+  i, c: integer;
   DE: TQNX6_ARawDirEntry;
   stat: TStat;
   bName: string;
 begin
   c := FS.ReadDirectory(aName, DE);
   if c < 1 then
-  begin
-    Result := -ESysENOENT;
-    exit;
-  end;
+    Exit(-ESysENOENT);
 
-  for i := 0 to pred(c) do
+  for i := 0 to c - 1 do
   begin
     if DE[i].inode > 0 then
     begin
       stat := qnx6_InodeStat(DE[i].inode);
       bName := FS.RawDirEntryGetName(DE[i]);
-      if aFillDirFunc(aBuffer, @bName[1], @stat, 0) <> 0 then
-        raise EHeapException.Create('filler error');
+      if (bName <> '') and (aFillDirFunc(aBuffer, PChar(bName), @stat, 0) <> 0) then
+        Exit(-ESysENOMEM);
     end;
   end;
   Result := 0;
 end;
 
-{ Release directory
-
-  Introduced in version 2.3
-}
+{ Release directory }
 function qnx6_releasedir(const aName: pchar; aFileInfo: PFuseFileInfo): cint; cdecl;
 begin
-
+  Result := 0;
 end;
 
-{ Synchronize directory contents
-
-  If the datasync parameter is non-zero, then only the user data should be
-  flushed, not the meta data
-
-  Introduced in version 2.3
-}
+{ Synchronize directory contents }
 function qnx6_fsyncdir(const aName: pchar; aDataSync: integer; aFileInfo: PFuseFileInfo): cint; cdecl;
 begin
   FS.Flush;
   Result := 0;
 end;
 
-{ Initialize filesystem
-
-  The return value will passed in the private_data field of fuse_context to
-  all file operations and as a parameter to the destroy() method.
-
-  Introduced in version 2.3
-  Changed in version 2.6
-}
+{ Initialize filesystem }
 function qnx6_init(var aConnectionInfo: TFuseConnInfo): pointer; cdecl;
 begin
-
+  Result := nil;
 end;
 
-{ Clean up filesystem
-
-  Called on filesystem exit.
-
-  Introduced in version 2.3
-}
+{ Clean up filesystem }
 procedure qnx6_destroy(aUserData: pointer); cdecl;
 begin
-  FS.Flush;
+  if Assigned(FS) then
+    FS.Flush;
 end;
 
-{ Check file access permissions
-
-  This will be called for the access() system call. If the
-  'default_permissions' mount option is given, this method is not called.
-
-  This method is not called under Linux kernel versions 2.4.x
-
-  Introduced in version 2.5
-}
+{ Check file access permissions }
 function qnx6_access(const aName: pchar; aMode: cint): cint; cdecl;
 begin
+  Result := 0;
 end;
 
-{ Create and open a file
-
-  If the file does not exist, first create it with the specified mode, and
-  then open it.
-
-  If this method is not implemented or under Linux kernel versions earlier
-  than 2.6.15, the mknod() and open() methods will be called instead.
-
-  Introduced in version 2.5
-}
+{ Create and open a file }
 function qnx6_create(const aName: pchar; aMode: TMode; aFileInfo: PFuseFileInfo): cint; cdecl;
 begin
   Result := FS.CreateFile(aName, aMode);
   if Result > 0 then Result := 0;
 end;
 
-{ Change the size of an open file
-
-  This method is called instead of the truncate() method if the truncation
-  was invoked from an ftruncate() system call.
-
-  If this method is not implemented or under Linux kernel versions earlier
-  than 2.6.15, the truncate() method will be called instead.
-
-  Introduced in version 2.5
-}
+{ Change the size of an open file }
 function qnx6_ftruncate(const aName: pchar; aSize: TOff; aFileInfo: PFuseFileInfo): cint; cdecl;
 begin
+  Result := 0;
 end;
 
-{ Get attributes from an open file
-
-  This method is called instead of the getattr() method if the file
-  information is available.
-
-  Currently this is only called after the create() method if that is
-  implemented (see above). Later it may be called for invocations of fstat()
-  too.
-
-  Introduced in version 2.5
-}
+{ Get attributes from an open file }
 function qnx6_fgetattr(const aName: pchar; aOutStat: PStat; PFileInfo: PFuseFileInfo): cint; cdecl;
 begin
+  Result := 0;
 end;
 
-{ Perform POSIX file locking operation
-
-  The cmd argument will be either F_GETLK, F_SETLK or F_SETLKW.
-
-  For the meaning of fields in 'struct flock' see the man page for fcntl(2).
-  The l_whence field will always be set to SEEK_SET.
-
-  For checking lock ownership, the 'fuse_file_info->owner'argument must be
-  used.
-
-  For F_GETLK operation, the library will first check currently held locks,
-  and if a conflicting lock is found it will return information without
-  calling this method. This ensures, that for local locks the l_pid field is
-  correctly filled in. The results may not be accurate in case of race
-  conditions and inthe presence of hard links, but it's unlikly that an
-  application would rely on accurate GETLK results in these cases. If a
-  conflicting lock is not found, this method will be called, and the
-  filesystem may fill out l_pid by a meaningful value, or it may leave this
-  field zero.
-
-  or F_SETLK and F_SETLKW the l_pid field will be set to the pid of the
-  process performing the locking operation.
-
-  Note: if this method is not implemented, the kernel will still allow file
-  locking to work locally. Hence it is only interesting for network
-  filesystems and similar.
-
-  Introduced in version 2.6
-}
+{ Perform POSIX file locking operation }
 function qnx6_lock(const aName: pchar; aFileInfo: PFuseFileInfo; aCMD: cint; var aLock: FLock): cint; cdecl;
 begin
+  Result := 0;
 end;
 
-{ Change the access and modification times of a file with nanosecond
-  resolution
-
-  Introduced in version 2.6
-}
+{ Change access and modification times }
 function qnx6_utimens(const aName: pchar; const aTime: TFuseTimeTuple): cint; cdecl;
 var
   idx: integer;
@@ -673,89 +455,38 @@ begin
   end
   else
     Result := -ESysENOENT;
-
 end;
-
 
 var
   qnx6_oper: TFuseOperations;
-{
-  (getattr: @qnx6_getattr;
-  readlink: nil;
-  mknod: nil;
-  mkdir: nil;
-  unlink: nil;
-  rmdir: nil;
-  symlink: nil;
-  rename: nil;
-  link: nil;
-  chmod: nil;
-  chown: nil;
-  truncate: nil;
-  Open: @qnx6_open;
-  Read: @qnx6_read;
-  Write: nil;
-  statfs: nil;
-  flush: nil;
-  Release: nil;
-  fsync: nil;
-  setxattr: nil;
-  getxattr: nil;
-  listxattr: nil;
-  removexattr: nil;
-  opendir: nil;
-  readdir: @qnx6_readdir;
-  releasedir: nil;
-  fsyncdir: nil;
-  init: nil;
-  Destroy: nil;
-  access: nil;
-  Create: nil;
-  lock: nil;
-  utimens: nil;
-  bmap: nil;
-  );
-}
 
 procedure QNX6Mount(fileName, mountpoint: string; fg: boolean = False; dbg: boolean = False);
 var
   fStream: TFileStream;
-  _argc: integer;
   _argv: array of pchar;
-  res, i: integer;
+  res, argIdx: integer;
 begin
-  _argc := 4;
-  {$IFDEF DEBUG}
-  _argc := 5;
-  {$ELSE}
-  if fg then Inc(_argc);
-  if dbg then Inc(_argc);
-  i := 4;
-  {$ENDIF}
   MP := ExpandFileName(mountpoint);
 
-  SetLength(_argv, _argc);
+  SetLength(_argv, 4);
   _argv[0] := PChar(fileName);
   _argv[1] := PChar(MP);
-  _argv[2] := '-ofsname=qnx6';
-  _argv[3] := '-s';
-  {$IFDEF DEBUG}
-  _argv[4] := '-d';
-  _argv[4] := '-f';
-  {$ELSE}
+  _argv[2] := PChar('-ofsname=qnx6');
+  _argv[3] := PChar('-s');
+
   if fg then
   begin
-    _argv[i] := '-f';
-    Inc(i);
-  end;
-  if dbg then
-  begin
-    _argv[i] := '-d';
-    Inc(i);
+    argIdx := Length(_argv);
+    SetLength(_argv, argIdx + 1);
+    _argv[argIdx] := PChar('-f');
   end;
 
-  //_argv[4] := '-f';
-  {$ENDIF}
+  if dbg then
+  begin
+    argIdx := Length(_argv);
+    SetLength(_argv, argIdx + 1);
+    _argv[argIdx] := PChar('-d');
+  end;
 
   if FileExists(fileName) then
   begin
@@ -765,7 +496,7 @@ begin
       try
         FS.Open;
 
-        qnx6_oper := default(TFuseOperations);
+        qnx6_oper := Default(TFuseOperations);
         with qnx6_oper do
         begin
           Open := @qnx6_open;
@@ -786,25 +517,17 @@ begin
           rename := @qnx6_rename;
           utimens := @qnx6_utimens;
           statfs := @qnx6_statfs;
-          //fsync := @qnx6_fsync;
-          //fsyncdir := @qnx6_fsyncdir;
-          //flush := @qnx6_flush;
           Destroy := @qnx6_destroy;
         end;
 
-        res := fuse_main(_argc, @_argv[0], @qnx6_oper, SizeOf(qnx6_oper), nil);
-
+        res := fuse_main(Length(_argv), @_argv[0], @qnx6_oper, SizeOf(qnx6_oper), nil);
       finally
         FreeAndNil(FS);
       end;
-
     finally
       FreeAndNil(fStream);
     end;
-
   end;
-
 end;
-
 
 end.

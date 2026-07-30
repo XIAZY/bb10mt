@@ -10,6 +10,7 @@ uses
 procedure UpdateHashes(const aBaseDir: string);
 procedure UpdateIds(const aBaseDir: string);
 procedure CreateBar(const aBaseDir: string; const Name: string);
+
 {$IFDEF LINUX}
 function InstallUnpackedBar(const bar: string; const mountPoint: string): integer;
 {$ENDIF}
@@ -21,9 +22,9 @@ uses
   fpjson,
   mormot.crypt.core,
   uCrypto,
-  jsonparser, DOM, XMLRead
+  DOM, XMLRead
   {$IFDEF LINUX}
-  ,BaseUnix, Unix
+  , BaseUnix, Unix
   {$ENDIF}
   ;
 
@@ -43,7 +44,7 @@ begin
   end;
 end;
 
-function GenID(const Seed: string): string;
+function GenID(const Seed: rawbytestring): string;
 begin
   Result := Base64UrlEncode(Sha1(Seed));
 end;
@@ -53,19 +54,13 @@ var
   G: TGUID;
   Buf: rawbytestring;
 begin
-  // РЎС‚РІРѕСЂСЋС”РјРѕ РЅРѕРІРёР№ GUID (16 Р±Р°Р№С‚ Сѓ G)
   if CreateGUID(G) <> S_OK then
     Exit('');
 
-  // Р’РёРґС–Р»СЏС”РјРѕ СЂСЏРґРѕРє Р·Р°РІРґРѕРІР¶РєРё 16 Р±Р°Р№С‚
   SetLength(Buf, SizeOf(TGUID));
-  // РљРѕРїС–СЋС”РјРѕ вЂњСЃРёСЂС–вЂќ Р±Р°Р№С‚Рё GUIDвЂ™Р° РІ СЂСЏРґРѕРє
   Move(G, Buf[1], SizeOf(TGUID));
-
-  // Р“РµРЅРµСЂСѓС”РјРѕ РІР°С€ ID РЅР° РѕСЃРЅРѕРІС– С†РёС… Р±Р°Р№С‚
   Result := GenID(Buf);
 end;
-
 
 procedure UpdateIds(const aBaseDir: string);
 const
@@ -83,34 +78,31 @@ var
   i, idx, sepPos: integer;
   keyName: string;
 begin
-  // 1. Р¤РѕСЂРјСѓС”РјРѕ РїРѕРІРЅРёР№ С€Р»СЏС… РґРѕ РјРµС‚Р°С„Р°Р№Р»Р°
   metaPath := IncludeTrailingPathDelimiter(aBaseDir) + metafile;
+  if not FileExists(metaPath) then Exit;
 
   sl := TStringList.Create;
   try
     sl.LoadFromFile(metaPath);
 
-    // 2. РџСЂРѕС…РѕРґРёРјРѕ РїРѕ СЂСЏРґРєР°С… С– РѕРЅРѕРІР»СЋС”РјРѕ С‚С–Р»СЊРєРё РїРѕС‚СЂС–Р±РЅС–
     for i := 0 to sl.Count - 1 do
     begin
       sepPos := Pos(':', sl[i]);
       if sepPos > 0 then
       begin
-        // РІРёРґС–Р»СЏС”РјРѕ С–РјвЂ™СЏ РєР»СЋС‡Р° Р»С–РІРѕСЂСѓС‡ РІС–Рґ РґРІРѕРєСЂР°РїРєРё
         keyName := Trim(Copy(sl[i], 1, sepPos - 1));
 
-        // РїРµСЂРµРІС–СЂСЏС”РјРѕ РІСЃС– РєРѕРЅСЃС‚Р°РЅС‚РЅС– РєР»СЋС‡С–
         for idx := Low(Keys) to High(Keys) do
+        begin
           if SameText(keyName, Keys[idx]) then
           begin
-            // Р·Р°РјС–РЅСЋС”РјРѕ С†С–Р»РёР№ СЂСЏРґРѕРє РЅР° РЅРѕРІРёР№ ID
             sl[i] := Format('%s: andr%s%s', [Keys[idx], Prefixes[idx], GetRandomId]);
             Break;
           end;
+        end;
       end;
     end;
 
-    // 3. Р—Р±РµСЂС–РіР°С”РјРѕ Р·РјС–РЅРё
     sl.SaveToFile(metaPath);
   finally
     sl.Free;
@@ -122,44 +114,40 @@ begin
   Result := Format('Archive-Manifest-Version: 1.5' + LineEnding +
     'Archive-Created-By: BlackBerry Data BAR Packager 1.11' + LineEnding +
     'Package-Type: system-data' + LineEnding + 'Package-Author: Research In Motion Limited' +
-    LineEnding + 'Package-Author-Id: andrA%%s' + LineEnding + 'Package-Name: sys.data.%%s' +
-    LineEnding + 'Package-Id: andrB%%s' + LineEnding + 'Package-Version: 1.0.0.0' +
-    LineEnding + 'Package-Version-Id: andrC%%s' + LineEnding + 'Package-Architecture: armle-v7' +
+    LineEnding + 'Package-Author-Id: andrA%s' + LineEnding + 'Package-Name: sys.data.%s' +
+    LineEnding + 'Package-Id: andrB%s' + LineEnding + 'Package-Version: 1.0.0.0' +
+    LineEnding + 'Package-Version-Id: andrC%s' + LineEnding + 'Package-Architecture: armle-v7' +
     LineEnding + LineEnding + 'System-Data-Type: os_data' + LineEnding +
     'System-Data-Requires-System: os/10.0.0.8' + LineEnding + 'System-Data-Persistence: permanent' +
     LineEnding, [GetRandomId, Name, GetRandomId, GetRandomId]);
 end;
 
-
 function ManifestMain(const aFileName: string): string;
 const
   SearchTag = 'Archive-Asset-';
 var
-  txt: TextFile;
-  line: string;
-  acc: TStringList;
+  sl, acc: TStringList;
+  i: integer;
 begin
+  Result := '';
+  if not FileExists(aFileName) then Exit;
+
+  sl := TStringList.Create;
   acc := TStringList.Create;
   try
-    AssignFile(txt, aFileName);
-    Reset(txt);
-    try
-      while not EOF(txt) do
-      begin
-        ReadLn(txt, line);
-        if Pos(SearchTag, line) > 0 then
-          Break;
-        acc.Add(line);
-      end;
-    finally
-      CloseFile(txt);
+    sl.LoadFromFile(aFileName);
+    for i := 0 to sl.Count - 1 do
+    begin
+      if Pos(SearchTag, sl[i]) > 0 then
+        Break;
+      acc.Add(sl[i]);
     end;
     Result := acc.Text;
   finally
+    sl.Free;
     acc.Free;
   end;
 end;
-
 
 function ParseManifest(const FileName: string): TJSONObject;
 var
@@ -169,36 +157,32 @@ var
   i, ColonPos: integer;
   sLine, Key, Value: string;
 begin
-  // РџС–РґРіРѕС‚РѕРІРєР° Р·Р°РіР°Р»СЊРЅРѕРіРѕ JSON
   Result := TJSONObject.Create;
   SectionArr := TJSONArray.Create;
   Result.Add('sections', SectionArr);
 
-  // Р—Р°РІР°РЅС‚Р°Р¶СѓС”РјРѕ С„Р°Р№Р»
   Lines := TStringList.Create;
   try
     Lines.LoadFromFile(FileName);
 
-    // Р†РЅС–С†С–Р°Р»С–Р·СѓС”РјРѕ РїРµСЂС€Сѓ СЃРµРєС†С–СЋ
     AttrObj := TJSONObject.Create;
     SectionObj := TJSONObject.Create(['_', AttrObj]);
 
-    // РџСЂРѕС…РѕРґРёРјРѕ РїРѕ С–РЅРґРµРєСЃР°С…, С‰РѕР± РјР°С‚Рё Р·РјРѕРіСѓ РІС–Р»СЊРЅРѕ РїСЂРёР·РЅР°С‡Р°С‚Рё sLine
     for i := 0 to Lines.Count - 1 do
     begin
       sLine := Trim(Lines[i]);
       if sLine = '' then
       begin
-        // Р—Р°РІРµСЂС€СѓС”РјРѕ РїРѕС‚РѕС‡РЅСѓ СЃРµРєС†С–СЋ, СЏРєС‰Рѕ РІРѕРЅР° РјР°С” РІРјС–СЃС‚
         if AttrObj.Count > 0 then
-          SectionArr.Add(SectionObj);
-        // Р“РѕС‚СѓС”РјРѕ РЅРѕРІСѓ СЃРµРєС†С–СЋ
+          SectionArr.Add(SectionObj)
+        else
+          SectionObj.Free;
+
         AttrObj := TJSONObject.Create;
         SectionObj := TJSONObject.Create(['_', AttrObj]);
       end
       else
       begin
-        // РџР°СЂСЃРёРјРѕ РєР»СЋС‡ С– Р·РЅР°С‡РµРЅРЅСЏ
         ColonPos := Pos(':', sLine);
         if ColonPos > 0 then
         begin
@@ -209,7 +193,6 @@ begin
       end;
     end;
 
-    // Р”РѕРґР°С”РјРѕ РѕСЃС‚Р°РЅРЅСЋ СЃРµРєС†С–СЋ, СЏРєС‰Рѕ РІРѕРЅР° РЅРµРїСѓСЃС‚Р°
     if AttrObj.Count > 0 then
       SectionArr.Add(SectionObj)
     else
@@ -236,8 +219,13 @@ begin
 
     Found := True;
     for a := Low(Attrs) to High(Attrs) do
-      if not Assigned(Inner.Find(Attrs[a])) then
+    begin
+      if Inner.Find(Attrs[a]) = nil then
+      begin
         Found := False;
+        Break;
+      end;
+    end;
 
     if Found then
       Exit(Inner);
@@ -250,13 +238,13 @@ function GetAttr(const Obj: TJSONObject; const Name: string): string;
 var
   Val: TJSONData;
 begin
+  if Obj = nil then Exit('');
   Val := Obj.Find(Name);
   if Assigned(Val) then
     Result := Val.AsString
   else
     Result := '';
 end;
-
 
 function GetPackageDName(Manifest: TJSONObject): string;
 var
@@ -278,7 +266,6 @@ begin
   Result := Format('%s.%s', [PackageName, PackageId]);
 end;
 
-
 function ConvertManifestToApplications(ManifestJSON: TJSONObject; const Gid: integer;
   const Extras: string): string;
 var
@@ -293,8 +280,8 @@ begin
     if (Sections = nil) or (Sections.Count = 0) then
       raise Exception.Create('Manifest has no sections.');
 
-    Attrs := FindSectionWithAttrs(Sections, ['Package-Name', 'Package-Id',
-      'Package-Version', 'Package-Version-Id']);
+    Attrs := FindSectionWithAttrs(Sections, ['Package-Name', 'Package-Id', 'Package-Version',
+      'Package-Version-Id']);
     if Attrs = nil then
       raise Exception.Create('Required package fields not found.');
 
@@ -306,21 +293,17 @@ begin
     OutputJSON.Add('Package-Id', PackageId);
     OutputJSON.Add('Package-Version', PackageVersion);
     OutputJSON.Add('Package-Version-Id', PackageVersionId);
-    OutputJSON.Add('_', ManifestJSON);
-    ManifestJSON := nil;
+    OutputJSON.Add('_', ManifestJSON.Clone);
     OutputJSON.Add('extras', Extras);
     OutputJSON.Add('gid', Gid);
 
     Result := Format('%s.%s:json:%s', [PackageName, PackageId, OutputJSON.AsJSON]);
   finally
-    if Assigned(ManifestJSON) then
-      ManifestJSON.Free;
     OutputJSON.Free;
   end;
 end;
 
-
-function ConvertManifestToRegisteredApp(Manifest: TJSONObject; const Size: integer;
+function ConvertManifestToRegisteredApp(Manifest: TJSONObject; const Gid: integer;
   const Extras: string): string;
 var
   Sections: TJSONArray;
@@ -339,9 +322,8 @@ begin
   PkgId := GetAttr(Attrs, 'Package-Id');
   PkgVersion := GetAttr(Attrs, 'Package-Version');
 
-  Result := Format('%s.%s::%s,%s,,,%d,%s', [PkgName, PkgId, PkgId, PkgVersion, Size, Extras]);
+  Result := Format('%s.%s::%s,%s,,,%d,%s', [PkgName, PkgId, PkgId, PkgVersion, Gid, Extras]);
 end;
-
 
 function ConvertManifestToServices(Manifest: TJSONObject): TStringList;
 const
@@ -384,9 +366,9 @@ var
       else if AnsiStartsText('path=', Value) then
       begin
         Value := Copy(Value, Length('path=') + 1, MaxInt);
-        PathList.DelimitedText := Value;
         PathList.StrictDelimiter := True;
         PathList.Delimiter := ':';
+        PathList.DelimitedText := Value;
       end;
     end;
 
@@ -410,7 +392,6 @@ begin
     if Sections = nil then
       raise Exception.Create('Manifest has no sections.');
 
-    // Р—С‡РёС‚СѓС”РјРѕ Package-Name + Package-Id
     Attrs := FindSectionWithAttrs(Sections, ['Package-Name', 'Package-Id']);
     if Attrs = nil then
       raise Exception.Create('No section with Package-Name and Package-Id');
@@ -418,7 +399,6 @@ begin
     PkgName := GetAttr(Attrs, 'Package-Name');
     PkgId := GetAttr(Attrs, 'Package-Id');
 
-    // РџСЂРѕС…РѕРґРёРјРѕ РІСЃС– СЃРµРєС†С–С—, С€СѓРєР°С”РјРѕ Entry-Point-Key + Entry-Point
     for i := 0 to Sections.Count - 1 do
     begin
       Section := Sections.Objects[i];
@@ -435,10 +415,8 @@ begin
     ParamList.Free;
     PathList.Free;
     JSONArr.Free;
-    // ResultPairs РЅРµ Р·РІС–Р»СЊРЅСЏС”РјРѕ вЂ” РїРѕРІРµСЂС‚Р°С”РјРѕ Р№РѕРіРѕ
   end;
 end;
-
 
 function ExtractFilters(const DescriptorFile: string): TJSONArray;
 var
@@ -448,8 +426,13 @@ var
   Action, Mime, Uris: string;
 begin
   Filters := TJSONArray.Create;
+  if not FileExists(DescriptorFile) then
+    Exit(Filters);
+
   ReadXMLFile(Doc, DescriptorFile);
   try
+    if Doc.DocumentElement = nil then Exit(Filters);
+
     Node := Doc.DocumentElement.FirstChild;
     while Assigned(Node) do
     begin
@@ -508,79 +491,84 @@ var
     EntryType: 'card.previewer'; Ref: 'e1'), (Suffix: '.service'; EntryType: 'service';
     Ref: 'service'), (Suffix: '.card.composer'; EntryType: 'card.composer'; Ref: 'e1'));
   JsonEntry: TJSONObject;
-  i: integer;
+  i, sepPos: integer;
 begin
   Result := TStringList.Create;
   Manifest := TStringList.Create;
+  Filters := nil;
   try
-    Manifest.LoadFromFile(ManifestFile);
-    for Line in Manifest do
+    if FileExists(ManifestFile) then
     begin
-      if Pos(': ', Line) > 0 then
+      Manifest.LoadFromFile(ManifestFile);
+      for Line in Manifest do
       begin
-        Key := Trim(Copy(Line, 1, Pos(': ', Line) - 1));
-        Value := Trim(Copy(Line, Pos(': ', Line) + 2, MaxInt));
-        if Key = 'Package-Name' then PackageName := Value;
-        if Key = 'Package-Id' then PackageId := Value;
+        sepPos := Pos(': ', Line);
+        if sepPos > 0 then
+        begin
+          Key := Trim(Copy(Line, 1, sepPos - 1));
+          Value := Trim(Copy(Line, sepPos + 2, MaxInt));
+          if Key = 'Package-Name' then PackageName := Value;
+          if Key = 'Package-Id' then PackageId := Value;
+        end;
       end;
     end;
+
     DName := PackageName + '.' + PackageId;
     Filters := ExtractFilters(DescriptorFile);
 
     for i := 0 to High(EntryTypes) do
     begin
       JsonEntry := TJSONObject.Create;
-      JsonEntry.Add('dname', DName);
-      JsonEntry.Add('entry_point_ref', EntryTypes[i].Ref);
-      JsonEntry.Add('type', EntryTypes[i].EntryType);
-      if EntryTypes[i].EntryType = 'application' then
-        JsonEntry.Add('filter', Filters.Clone)
-      else
-        JsonEntry.Add('filter', TJSONArray.Create);
-      JsonEntry.Add('install_order', InstallOrder);
-      JsonEntry.Add('transaction_id', 1);
+      try
+        JsonEntry.Add('dname', DName);
+        JsonEntry.Add('entry_point_ref', EntryTypes[i].Ref);
+        JsonEntry.Add('type', EntryTypes[i].EntryType);
+        if EntryTypes[i].EntryType = 'application' then
+          JsonEntry.Add('filter', Filters.Clone)
+        else
+          JsonEntry.Add('filter', TJSONArray.Create);
+        JsonEntry.Add('install_order', InstallOrder);
+        JsonEntry.Add('transaction_id', 1);
 
-      Result.Add(PackageName + EntryTypes[i].Suffix + ':json:' + JsonEntry.AsJSON);
-      JsonEntry.Free;
+        Result.Add(PackageName + EntryTypes[i].Suffix + ':json:' + JsonEntry.AsJSON);
+      finally
+        JsonEntry.Free;
+      end;
     end;
 
   finally
     Manifest.Free;
-    Filters.Free;
+    if Assigned(Filters) then Filters.Free;
   end;
 end;
-
 
 procedure CreateBar(const aBaseDir, Name: string);
 var
   BasePath, AssetsDir, DataDir, MetaDir, ManifestPath: string;
-  buf: ansistring;
+  buf: string;
   fs: TFileStream;
   h: THandle;
 begin
-  // 1. Р¤РѕСЂРјСѓС”РјРѕ Р±Р°Р·РѕРІС– С€Р»СЏС…Рё Р· РіР°СЂР°РЅС‚С–С”СЋ РєС–РЅС†РµРІРѕРіРѕ СЂРѕР·РґС–Р»СЊРЅРёРєР°
   BasePath := IncludeTrailingPathDelimiter(aBaseDir) + 'sys.data.' + Name;
   AssetsDir := IncludeTrailingPathDelimiter(BasePath) + 'assets';
   DataDir := IncludeTrailingPathDelimiter(AssetsDir) + 'data';
   MetaDir := IncludeTrailingPathDelimiter(BasePath) + 'META-INF';
 
-  // 2. РЎС‚РІРѕСЂСЋС”РјРѕ РєР°С‚Р°Р»РѕРіРё (СЏРєС‰Рѕ С‰Рµ РЅРµ С–СЃРЅСѓСЋС‚СЊ)
   ForceDirectories(DataDir);
   ForceDirectories(MetaDir);
 
-  // 3. Р”РѕРїРѕРјС–Р¶РЅРёР№ В«touchВ» РґР»СЏ РїРѕСЂРѕР¶РЅС–С… С„Р°Р№Р»С–РІ
   h := FileCreate(IncludeTrailingPathDelimiter(AssetsDir) + 'links');
-  FileClose(h);
-  h := FileCreate(IncludeTrailingPathDelimiter(AssetsDir) + 'perms');
-  FileClose(h);
+  if h <> THandle(-1) then FileClose(h);
 
-  // 4. Р“РµРЅРµСЂСѓС”РјРѕ С– Р·Р°РїРёСЃСѓС”РјРѕ MANIFEST.MF
+  h := FileCreate(IncludeTrailingPathDelimiter(AssetsDir) + 'perms');
+  if h <> THandle(-1) then FileClose(h);
+
   ManifestPath := IncludeTrailingPathDelimiter(MetaDir) + 'MANIFEST.MF';
   buf := GenerateManifestHeader(Name);
   fs := TFileStream.Create(ManifestPath, fmCreate);
   try
-    // РџРёС€РµРјРѕ РІРµСЃСЊ Р±СѓС„РµСЂ РІС–Рґ РїРµСЂС€РѕРіРѕ СЃРёРјРІРѕР»Р°
-    fs.Write(buf[1], Length(buf));
+    if Length(buf) > 0 then
+      fs.Write(buf[1], Length(buf) * SizeOf(char));
   finally
     fs.Free;
   end;
@@ -596,12 +584,14 @@ begin
   begin
     Line := TrimLeft(Lines[i]);
     for j := 0 to High(Prefixes) do
+    begin
       if AnsiStartsStr(Prefixes[j], Line) then
       begin
         Lines.Delete(i);
         Dec(i);
         Break;
       end;
+    end;
     Inc(i);
   end;
 end;
@@ -609,18 +599,15 @@ end;
 procedure DeleteAllLinesWithPrefixesInMultiFileSet(const Dir, BaseName: string;
   const Prefixes: array of string);
 var
-  FileList: TStringList;
+  FileList, Lines: TStringList;
   TargetFile: string;
   i: integer;
-  Lines: TStringList;
 begin
   FileList := TStringList.Create;
   Lines := TStringList.Create;
-
   try
     FindAllFiles(FileList, Dir, BaseName + '*', False);
-    if FileList.Count = 0 then
-      Exit;
+    if FileList.Count = 0 then Exit;
 
     for i := 0 to FileList.Count - 1 do
     begin
@@ -629,13 +616,11 @@ begin
       DeleteLinesWithPrefixes(Lines, Prefixes);
       Lines.SaveToFile(TargetFile);
     end;
-
   finally
     FileList.Free;
     Lines.Free;
   end;
 end;
-
 
 procedure ReplaceOrAddLines(var Lines: TStringList; const Prefixes, NewLines: array of string);
 var
@@ -648,19 +633,24 @@ begin
   SetLength(Found, Length(Prefixes));
 
   for i := 0 to Lines.Count - 1 do
+  begin
     for j := 0 to High(Prefixes) do
+    begin
       if not Found[j] and AnsiStartsStr(Prefixes[j], TrimLeft(Lines[i])) then
       begin
         Lines[i] := NewLines[j];
         Found[j] := True;
         Break;
       end;
+    end;
+  end;
 
   for j := 0 to High(Prefixes) do
+  begin
     if not Found[j] then
       Lines.Add(NewLines[j]);
+  end;
 end;
-
 
 procedure ReplaceOrAddLinesWithPrefixes(const FileName: string; const Prefixes, NewLines: array of string);
 var
@@ -669,9 +659,7 @@ begin
   Lines := TStringList.Create;
   try
     if FileExists(FileName) then
-      Lines.LoadFromFile(FileName)
-    else
-      Lines.Clear;
+      Lines.LoadFromFile(FileName);
 
     ReplaceOrAddLines(Lines, Prefixes, NewLines);
     Lines.SaveToFile(FileName);
@@ -680,15 +668,13 @@ begin
   end;
 end;
 
-
 procedure ReplaceOrAddLinesInMultiFileSet(const Dir, BaseName: string;
   const Prefixes, NewLines: array of string);
 var
-  FileList: TStringList;
+  FileList, Lines: TStringList;
   TargetFile: string;
   i, j, MaxIndex, FileIndex: integer;
   Found: array of boolean;
-  Lines: TStringList;
   Line: string;
 begin
   FileList := TStringList.Create;
@@ -711,26 +697,27 @@ begin
       begin
         Line := TrimLeft(Lines[j]);
         for FileIndex := 0 to High(Prefixes) do
+        begin
           if not Found[FileIndex] and AnsiStartsStr(Prefixes[FileIndex], Line) then
           begin
             Lines[j] := NewLines[FileIndex];
             Found[FileIndex] := True;
             Break;
           end;
+        end;
       end;
 
       Lines.SaveToFile(TargetFile);
 
       if TryStrToInt(Copy(ExtractFileExt(TargetFile), 2), FileIndex) then
+      begin
         if FileIndex > MaxIndex then
-          MaxIndex := FileIndex
-        else if SameText(ExtractFileName(TargetFile), BaseName) then
-          MaxIndex := 0;
+          MaxIndex := FileIndex;
+      end;
     end;
 
-    // Р”РѕРґР°С‚Рё РІС–РґСЃСѓС‚РЅС–
-    TargetFile := IfThen(MaxIndex <= 0, IncludeTrailingPathDelimiter(Dir) + BaseName,
-      Format('%s%s.%3.3d', [IncludeTrailingPathDelimiter(Dir), BaseName, MaxIndex]));
+    TargetFile := IfThen(MaxIndex < 0, IncludeTrailingPathDelimiter(Dir) + BaseName,
+      Format('%s%s.%.3d', [IncludeTrailingPathDelimiter(Dir), BaseName, MaxIndex]));
 
     if FileExists(TargetFile) then
       Lines.LoadFromFile(TargetFile)
@@ -738,8 +725,10 @@ begin
       Lines.Clear;
 
     for j := 0 to High(Prefixes) do
+    begin
       if not Found[j] then
         Lines.Add(NewLines[j]);
+    end;
 
     Lines.SaveToFile(TargetFile);
 
@@ -786,7 +775,6 @@ begin
   if not Assigned(Attrs) then
     raise Exception.Create('No section with Package-Name and Package-Id found.');
 
-  // РђС‚СЂРёР±СѓС‚Рё
   PkgName := GetAttr(Attrs, 'Package-Name');
   PkgId := GetAttr(Attrs, 'Package-Id');
   DisplayName := GetAttr(Attrs, 'Display-Name');
@@ -804,7 +792,6 @@ begin
   if IconsRaw = '' then IconsRaw := DEFAULT_ICON;
   if Orientation = '' then Orientation := 'auto';
 
-  // РћР±СЂРѕР±РєР° Entry-Point
   if EPExpr = '' then
     EPBinary := 'app/native/' + PkgName
   else
@@ -831,7 +818,6 @@ begin
   end;
 end;
 
-
 procedure UpdateHashes(const aBaseDir: string);
 const
   EntryFmt: string =
@@ -842,34 +828,26 @@ var
   fileList, manifestList: TStringList;
   fullPath, relPath, hash: string;
 begin
-  // 1. Р“Р°СЂР°РЅС‚СѓС”РјРѕ, С‰Рѕ BaseDir Р·Р°РєС–РЅС‡СѓС”С‚СЊСЃСЏ РЅР° '\' Р°Р±Рѕ '/'
   BaseDir := IncludeTrailingPathDelimiter(aBaseDir);
   AssetDir := BaseDir + 'assets';
   ManifestFile := BaseDir + metafile;
-
-  // 2. Р—Р°РїР°РјвЂ™СЏС‚РѕРІСѓС”РјРѕ РґРѕРІР¶РёРЅСѓ Р· СѓСЂР°С…СѓРІР°РЅРЅСЏРј СЂРѕР·РґС–Р»СЊРЅРёРєР°
   BaseLen := Length(BaseDir);
 
-  // 3. Р—Р±РёСЂР°С”РјРѕ РІСЃС– С„Р°Р№Р»Рё Р· assets СЂРµРєСѓСЂСЃРёРІРЅРѕ
   fileList := TStringList.Create;
   try
     FindAllFiles(fileList, AssetDir, '*', True);
 
-    // 4. Р—Р°РІР°РЅС‚Р°Р¶СѓС”РјРѕ РѕСЃРЅРѕРІРЅРёР№ РјР°РЅС–С„РµСЃС‚
     manifestList := TStringList.Create;
     try
       manifestList.Text := ManifestMain(ManifestFile);
 
-      // 5. Р”Р»СЏ РєРѕР¶РЅРѕРіРѕ С„Р°Р№Р»Сѓ: РѕР±С‡РёСЃР»СЋС”РјРѕ SHA-512 С– РґРѕРґР°С”РјРѕ Р·Р°РїРёСЃ
       for fullPath in fileList do
       begin
         hash := CalcSha512(fullPath);
-        // РІС–РґРЅРѕСЃРЅРёР№ С€Р»СЏС… вЂ” СѓСЃРµ РїС–СЃР»СЏ BaseDir
         relPath := Copy(fullPath, BaseLen + 1, MaxInt);
         manifestList.Add(Format(EntryFmt, [relPath, hash]));
       end;
 
-      // 6. Р—Р±РµСЂС–РіР°С”РјРѕ РѕРЅРѕРІР»РµРЅРёР№ РјР°РЅС–С„РµСЃС‚
       manifestList.SaveToFile(ManifestFile);
     finally
       manifestList.Free;
@@ -878,7 +856,6 @@ begin
     fileList.Free;
   end;
 end;
-
 
 {$IFDEF LINUX}
 function ChownChmodRecursive(const Path: string; const uid, gid: integer;
@@ -891,11 +868,9 @@ var
 begin
   Result := True;
 
-  // Р’СЃС‚Р°РЅРѕРІРёС‚Рё РІР»Р°СЃРЅРёРєР° (РґР»СЏ РїРѕС‚РѕС‡РЅРѕРіРѕ РѕР±'С”РєС‚Р°)
   if fpChown(PChar(Path), uid, gid) <> 0 then
     Exit(False);
 
-  // Р’РёР·РЅР°С‡РёС‚Рё С‚РёРї: С„Р°Р№Р» С‡Рё РєР°С‚Р°Р»РѕРі
   if fpStat(PChar(Path), StatBuf) <> 0 then
     Exit(False);
 
@@ -904,15 +879,12 @@ begin
   else
     Mode := DefaultMode;
 
-  // Р’СЃС‚Р°РЅРѕРІРёС‚Рё РїСЂР°РІР°
   if fpChmod(PChar(Path), Mode) <> 0 then
     Exit(False);
 
-  // РЇРєС‰Рѕ С†Рµ РЅРµ РєР°С‚Р°Р»РѕРі вЂ” Р·Р°РІРµСЂС€РёС‚Рё
   if not FPS_ISDIR(StatBuf.st_mode) then
     Exit(True);
 
-  // Р РµРєСѓСЂСЃРёРІРЅРѕ РїСЂРѕР№С‚РёСЃСЊ РїРѕ РІРјС–СЃС‚Сѓ РєР°С‚Р°Р»РѕРіСѓ
   if FindFirst(Path + DirectorySeparator + '*', faAnyFile, SR) = 0 then
   begin
     repeat
@@ -936,7 +908,6 @@ var
   Buffer: array[0..4095] of char;
   Len: ssize_t;
 begin
-  // РЇРєС‰Рѕ РїРѕСЃРёР»Р°РЅРЅСЏ РІР¶Рµ С–СЃРЅСѓС”
   if fpLStat(PChar(LinkPath), nil) = 0 then
   begin
     Len := fpReadLink(PChar(LinkPath), @Buffer[0], SizeOf(Buffer) - 1);
@@ -944,18 +915,12 @@ begin
     begin
       Buffer[Len] := #0;
       if StrPas(Buffer) = TargetPath then
-      begin
-        // РџРѕСЃРёР»Р°РЅРЅСЏ РІР¶Рµ РїСЂР°РІРёР»СЊРЅРµ вЂ” РЅС–С‡РѕРіРѕ РЅРµ СЂРѕР±РёРјРѕ
-        Result := True;
-        Exit;
-      end;
+        Exit(True);
     end;
-    // Р’РёРґР°Р»РёС‚Рё РЅРµРїСЂР°РІРёР»СЊРЅРµ Р°Р±Рѕ РїРѕС€РєРѕРґР¶РµРЅРµ РїРѕСЃРёР»Р°РЅРЅСЏ
     fpUnlink(PChar(LinkPath));
   end;
 
-  // РЎС‚РІРѕСЂРёС‚Рё РЅРѕРІРµ СЃРёРјР»С–РЅРє
-  Result := fpSymlink(PChar(TargetPath), PChar(LinkPath)) = 0;
+  Result := (fpSymlink(PChar(TargetPath), PChar(LinkPath)) = 0);
 end;
 
 const
@@ -972,11 +937,11 @@ var
   gid: integer;
   IdFile, LinkFile: string;
   IdPath, LinkPath: string;
+  FS: TFileStream;
 begin
   IdPath := IncludeTrailingPathDelimiter(mountPath) + ID_REL_PATH;
   LinkPath := IncludeTrailingPathDelimiter(mountPath) + LINK_REL_PATH;
 
-  // Create directories if needed
   if not DirectoryExists(IdPath) then
     if not ForceDirectories(IdPath) then
       raise Exception.Create('Failed to create ID directory: ' + IdPath);
@@ -985,7 +950,6 @@ begin
     if not ForceDirectories(LinkPath) then
       raise Exception.Create('Failed to create link directory: ' + LinkPath);
 
-  // Search for the first available GID
   for gid := MIN_GID to MAX_GID do
   begin
     IdFile := IdPath + DirectorySeparator + IntToStr(gid);
@@ -993,16 +957,14 @@ begin
 
     if (not FileExists(IdFile)) and (not FileExists(LinkFile)) then
     begin
-      with TFileStream.Create(IdFile, fmCreate) do
-        Free;
+      FS := TFileStream.Create(IdFile, fmCreate);
+      FS.Free;
       Exit(gid);
     end;
   end;
 
   raise EGroupIdPoolEmpty.Create('No available GID found (pool exhausted)');
 end;
-
-
 
 const
   PPS_BASE = '/var/pps/system/';
@@ -1028,16 +990,16 @@ var
       IncludeTrailingPathDelimiter(BaseMount + RelativePath) + BaseName,
       Prefixes,
       NewLines
-      );
+    );
   end;
 
-  procedure EnsureAppDirs(const BasePath, PackageName: string);
+  procedure EnsureAppDirs(const BasePath: string);
   var
     SubDir: string;
     SubDirs: array[0..3] of string = ('data', 'logs', 'sharewith', 'tmp');
   begin
     for SubDir in SubDirs do
-      MkDir(IncludeTrailingPathDelimiter(BasePath) + SubDir);
+      ForceDirectories(IncludeTrailingPathDelimiter(BasePath) + SubDir);
   end;
 
 begin
@@ -1053,46 +1015,38 @@ begin
     pkg := GetPackageDName(Manifest);
     TargetAppDir := IncludeTrailingPathDelimiter(BaseMount) + 'apps' + DirectorySeparator + pkg;
 
-    // РљРѕРїС–СЋРІР°РЅРЅСЏ bar, СЏРєС‰Рѕ С‰Рµ РЅРµ РІСЃС‚Р°РЅРѕРІР»РµРЅРѕ
     if not SameFileName(ExpandFileName(bar), ExpandFileName(TargetAppDir)) then
     begin
       if DirectoryExists(TargetAppDir) and not DeleteDirectory(TargetAppDir, False) then
         raise Exception.CreateFmt('Failed to remove existing directory: %s', [TargetAppDir]);
 
       if not CopyDirTree(bar, IncludeTrailingPathDelimiter(TargetAppDir), [cffOverwriteFile, cffCreateDestDirectory]) then
-        raise Exception.CreateFmt('Failed to copy %s в†’ %s', [bar, TargetAppDir]);
+        raise Exception.CreateFmt('Failed to copy %s -> %s', [bar, TargetAppDir]);
     end;
 
     if not ChownChmodRecursive(TargetAppDir, 89, gid) then
-      raise Exception.CreateFmt('Failed to set ownership/mode recursively for %s to 89:%d',
-        [TargetAppDir, gid]);
+      raise Exception.CreateFmt('Failed to set ownership/mode recursively for %s to 89:%d', [TargetAppDir, gid]);
 
-    // РЎС‚РІРѕСЂРµРЅРЅСЏ РґРёСЂРµРєС‚РѕСЂС–Р№ РґР»СЏ appdata
     AppDataBase := BaseMount + '/accounts/1000/_startup_data/appdata/' + pkg;
-    EnsureAppDirs(AppDataBase, pkg);
+    EnsureAppDirs(AppDataBase);
 
     if not ChownChmodRecursive(BaseMount + '/accounts/1000/_startup_data/appdata/', 1000, gid) then
-      raise Exception.CreateFmt('Failed to set ownership/mode recursively for %s to 1000:%d',
-        [TargetAppDir, gid]);
+      raise Exception.CreateFmt('Failed to set ownership/mode recursively for %s to 1000:%d', [TargetAppDir, gid]);
 
-    // РЎРёРјРІРѕР»С–С‡РЅРµ РїРѕСЃРёР»Р°РЅРЅСЏ
     LinkPath := IncludeTrailingPathDelimiter(BaseMount) + 'apps' + DirectorySeparator +
       'gid2app' + DirectorySeparator + IntToStr(gid);
     if not CreateSymbolicLink(LinkPath, TargetAppDir) then
-      raise Exception.CreateFmt('Failed to create symbolic link: %s в†’ %s', [LinkPath, TargetAppDir]);
+      raise Exception.CreateFmt('Failed to create symbolic link: %s -> %s', [LinkPath, TargetAppDir]);
 
-    // PPS installer в†’ appdetails
     ReplaceOrAddInMultiFileSet(
       BaseMount + PPS_INSTALLER_APP, 'applications',
       pkg,
       ConvertManifestToApplications(Manifest, gid, extra)
-      );
+    );
 
-    // PPS installer в†’ registeredapps
     AddOrReplace(PPS_INSTALLER_REG, '', [pkg],
       [ConvertManifestToRegisteredApp(Manifest, gid, extra)]);
 
-    // PPS bslauncher
     Pairs := ConvertManifestToServices(Manifest);
     try
       SetLength(Search, Pairs.Count);
@@ -1107,7 +1061,6 @@ begin
       Pairs.Free;
     end;
 
-    // PPS navigator
     AddOrReplace(PPS_NAVIGATOR_APPS, '', [pkg],
       [ConvertManifestToNavigatorEntry(Manifest)]);
 

@@ -133,8 +133,10 @@ begin
   end;
   GetParameterValue('--list', inputList);
   GetParameterValue('--input', inputInline);
-  sign := GetParameterValue('--sign', tmps);
-  fast := GetParameterValue('--fast', tmps);
+  if GetParameterValue('--sign', tmps) then
+    sign := StrToBool(tmps);
+  if GetParameterValue('--fast', tmps) then
+    fast := StrToBool(tmps);
   if GetParameterValue('--versions', tmps) then
   begin
     vers := TStringList.Create;
@@ -206,7 +208,8 @@ begin
     Exit(5);
   end;
   TConsole.WriteLn('Extracting files...', ccCyan);
-  unpackMFCQ(mfcqFile, @qcfm_callback);
+
+  unpackMFCQ(ExpandFileName(mfcqFile), @qcfm_callback);
 end;
 
 function TAutoloaderCommand.Execute: integer;

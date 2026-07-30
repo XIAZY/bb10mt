@@ -14,7 +14,7 @@ type
 type
   {$IFDEF USEGENERICS}
   TQueueX = specialize TQueue<dword>;
-  TSetX=  specialize TCustomSet<DWord>;
+  TSetX=  specialize THashSet<DWord>;
   {$ELSE}
   TQueueX = specialize TGLiteQueue<dword>;
   TSetSpec = specialize TGLiteHashSetLP<DWord, Dword>;
@@ -655,7 +655,7 @@ begin
   inherited Create;
   {$IFDEF USEGENERICS}
   fQueue := specialize TQueue<dword>.Create;
-  fSet := specialize TCustomSet<DWord>.Create;
+  fSet := specialize THashSet<DWord>.Create;
   {$ENDIF}
 end;
 

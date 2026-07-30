@@ -18,7 +18,7 @@
       <UseVersionInfo Value="True"/>
       <AutoIncrementBuild Value="True"/>
       <MinorVersionNr Value="1"/>
-      <BuildNr Value="98"/>
+      <BuildNr Value="107"/>
       <Attributes pvaDebug="True" pvaPreRelease="True"/>
       <StringTable CompanyName="Oleksandr" FileDescription="BB10 MultiTool"/>
     </VersionInfo>
@@ -478,6 +478,89 @@
         <Filename Value="uscript.pas"/>
         <IsPartOfProject Value="True"/>
         <UnitName Value="uScript"/>
+      </Unit>
+      <Unit>
+        <Filename Value="uqnxcmd.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="uqnx6device.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="uQNX6Device"/>
+      </Unit>
+      <Unit>
+        <Filename Value="uqnx6filesystem.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="uQNX6FileSystem"/>
+      </Unit>
+      <Unit>
+        <Filename Value="uqnx6blockmanager.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="uQNX6BlockManager"/>
+      </Unit>
+      <Unit>
+        <Filename Value="uqnx6inodemanager.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="uQNX6InodeManager"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx6.device.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx6.blockmgr.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx6.inodemgr.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx6.fsck.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx6.compactor.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx6.types.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx6.device.tests.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx6.blockmgr.tests.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx6.inodemgr.tests.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx6.tests.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx.utils.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="QNX.Utils"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx.debloat.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="QNX.Debloat"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx.commands.script.pas"/>
+        <IsPartOfProject Value="True"/>
+        <UnitName Value="QNX.Commands.Script"/>
+      </Unit>
+      <Unit>
+        <Filename Value="qnx6.triecache.pas"/>
+        <IsPartOfProject Value="True"/>
       </Unit>
     </Units>
   </ProjectOptions>

@@ -26,7 +26,7 @@ var
 
 
 begin
-  App := CreateCLIApplication('BB10 MultiTool', '0.5.9.9999999');
+  App := CreateCLIApplication('BB10 MultiTool', '0.6.0.0(alpha 2)');
   // Register command
   App.RegisterCommand(QNX6cmd);
   App.RegisterCommand(UnPack);

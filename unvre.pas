@@ -7,9 +7,8 @@ interface
 uses
   Classes, SysUtils;
 
-implementation
-
-uses crc;
+const
+  NVRAM_BLOCK_MAGIC = $4552564E; // 'NVRE' (Little-Endian)
 
 type
   TNVRAMBlockHeader = packed record
@@ -25,46 +24,63 @@ type
 
   TNVRAMBlock = record
     Header: TNVRAMBlockHeader;
-    Data: array of byte;
+    Data: TBytes;
     Magic: DWord;
   end;
 
 function ReadNVRAMBlock(Stream: TStream): TNVRAMBlock;
+function IsValidNVRAMBlock(const Block: TNVRAMBlock): boolean;
+
+implementation
+
+uses crc;
+
+function ReadNVRAMBlock(Stream: TStream): TNVRAMBlock;
 var
-  Block: TNVRAMBlock;
   HeaderSize: integer;
 begin
   HeaderSize := SizeOf(TNVRAMBlockHeader);
 
-  if Stream.Read(Block.Header, HeaderSize) <> HeaderSize then
+  if Stream.Read(Result.Header, HeaderSize) <> HeaderSize then
     raise Exception.Create('Cannot read NVRAM header');
 
-  SetLength(Block.Data, Block.Header.DataLen);
+  SetLength(Result.Data, Result.Header.DataLen);
 
-  if Stream.Read(pbyte(Block.Data)^, Block.Header.DataLen) <> Block.Header.DataLen then
-    raise Exception.Create('Cannot read NVRAM data');
+  if Result.Header.DataLen > 0 then
+  begin
+    if Stream.Read(Result.Data[0], Result.Header.DataLen) <> integer(Result.Header.DataLen) then
+      raise Exception.Create('Cannot read NVRAM data');
+  end;
 
-  if Stream.Read(Block.Magic, 4) <> 4 then
+  if Stream.Read(Result.Magic, SizeOf(DWord)) <> SizeOf(DWord) then
     raise Exception.Create('Cannot read NVRAM magic');
-
-  Result := Block;
 end;
 
 function IsValidNVRAMBlock(const Block: TNVRAMBlock): boolean;
 var
   CalcDataCRC, CalcHdrCRC: DWord;
+  DataPtr: Pointer;
 begin
+  // Перевірка відповідності заявленого розміру та фактичної довжини масиву
+  if DWord(Length(Block.Data)) <> Block.Header.DataLen then
+    Exit(False);
+
+  // Безпечне отримання вказівника на байти даних
+  if Block.Header.DataLen > 0 then
+    DataPtr := @Block.Data[0]
+  else
+    DataPtr := nil;
+
   // Обчислюємо CRC32 від Block.Data
-  CalcDataCRC := crc32(0, @Block.Data[0], Block.Header.DataLen);
+  CalcDataCRC := crc32(0, DataPtr, Block.Header.DataLen);
 
   if CalcDataCRC <> Block.Header.DataCrc then
     Exit(False);
 
-  // Обчислення CRC32 тільки з перших 7 полів (до HdrCrc)
+  // Обчислення CRC32 перших 7 полів заголовка (все до HdrCrc)
   CalcHdrCRC := crc32(0, @Block.Header, SizeOf(TNVRAMBlockHeader) - SizeOf(DWord));
 
-  Result := (CalcHdrCRC = Block.Header.HdrCrc) and (Block.Magic = $4552564E); // 'NVRE'
+  Result := (CalcHdrCRC = Block.Header.HdrCrc) and (Block.Magic = NVRAM_BLOCK_MAGIC);
 end;
-
 
 end.

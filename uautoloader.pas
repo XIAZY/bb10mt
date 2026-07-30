@@ -10,7 +10,6 @@ uses
 type
   TFileType = (ftUnknown, ftUser, ftOS, ftRadio, ftIFS);
 
-type
   TPEAutoloaderFileInfo = record
     Offset: int64;
     Size: int64;
@@ -20,48 +19,58 @@ type
 
   TPEAutoloaderFileInfoArray = array of TPEAutoloaderFileInfo;
 
-function AnalyzePEAutoloaderFiles(SourceStream: TFileStream): TPEAutoloaderFileInfoArray;
-function AnalyzePEAutoloaderFiles(const FileName: string): TPEAutoloaderFileInfoArray;
-procedure ExtractBlackBerryAutoloaderFromPE(const fileName: string);
+function AnalyzePEAutoloaderFiles(SourceStream: TFileStream): TPEAutoloaderFileInfoArray; overload;
+function AnalyzePEAutoloaderFiles(const FileName: string): TPEAutoloaderFileInfoArray; overload;
+procedure ExtractBlackBerryAutoloaderFromPE(const FileName: string);
 
 function MakeAutoloader(oFile: string; const iFiles: TStringList; capexe: string = 'cap.exe';
   ver: integer = 2; cb: TProgressCallback = nil): boolean;
 
 function ExtractCap(inFile, outFile: string): boolean;
 
-
 implementation
 
 uses PEFile, Math, FileUtil;
 
+const
+  START_SIGNATURE_DWORD = $97C5D59C; // Little endian signature
+  PFCQ_SIGNATURE = $71636670; // 'pfcq'
+  SCAN_BLOCK_SIZE = 65536;
+  MAX_FILES = 10;
+
 function ReadFileCount(Stream: TStream): int64;
 const
-  MAX_OFFSET_SEARCH = 1000;  // або інше обмеження
+  MAX_OFFSET_SEARCH = 1000;
 var
   OffsetTablePos: int64;
   SearchAttempts: integer;
   PosBeforeSearch: int64;
+  FileCountVal: DWord;
 begin
   Result := 0;
   SearchAttempts := 0;
   PosBeforeSearch := Stream.Position;
 
   repeat
-    // Читаємо потенційний офсет таблиці
-    if Stream.Read(OffsetTablePos, SizeOf(int64)) <> SizeOf(int64) then
+    if Stream.Position + SizeOf(int64) > Stream.Size then
       raise Exception.Create('Unexpected end of file while searching for offset table');
 
-    // Перевіряємо валідність позиції офсета таблиці
+    if Stream.Read(OffsetTablePos, SizeOf(int64)) <> SizeOf(int64) then
+      raise Exception.Create('Error reading offset table position');
+
     if (OffsetTablePos > PosBeforeSearch) and (OffsetTablePos < Stream.Size) and
       (Abs(OffsetTablePos - Stream.Position) < 1000) then
     begin
-      // Повертаємось на 16 байт назад (логіка з вашого коду)
-      Stream.Position := Stream.Position - 16;
+      if Stream.Position >= 16 then
+        Stream.Position := Stream.Position - 16
+      else
+        Stream.Position := 0;
 
-      // Читаємо FileCount
-      if Stream.Read(Result, SizeOf(int64)) <> SizeOf(int64) then
+      // Читаємо значення FileCount
+      if Stream.Read(FileCountVal, SizeOf(QWord)) <> SizeOf(QWord) then
         raise Exception.Create('Error reading file count');
 
+      Result := FileCountVal;
       Exit;
     end;
 
@@ -71,16 +80,9 @@ begin
   raise Exception.Create('Failed to find valid file count after max search attempts');
 end;
 
-const
-  START_SIGNATURE_DWORD = $97C5D59C; // little endian '…'
-  PFCQ_SIGNATURE = $71636670; // 'pfcq' in little-endian
-
-  SCAN_BLOCK_SIZE = 65536;
-  MAX_FILES = 10;
-
 function FindSignature(const Stream: TStream; StartPos: int64): int64;
 var
-  Buffer: array of byte;
+  Buffer: TBytes;
   Position, I: int64;
   BytesRead, SearchSize: integer;
   DWordPtr1, DWordPtr2: PDWORD;
@@ -89,7 +91,7 @@ begin
   SetLength(Buffer, SCAN_BLOCK_SIZE);
   Position := StartPos;
 
-  while Position < Stream.Size - 20 do
+  while Position <= Stream.Size - 20 do
   begin
     Stream.Position := Position;
     BytesRead := Stream.Read(Buffer[0], Length(Buffer));
@@ -114,11 +116,14 @@ end;
 
 function DetermineFileType(const Buffer: array of byte): TFileType;
 var
-  I: integer;
+  I, MaxLen: integer;
   DWordPtr: PDWORD;
 begin
   Result := ftUnknown;
-  for I := 0 to Min(Length(Buffer), 64) - 16 do
+  MaxLen := Min(Length(Buffer), 64);
+  if MaxLen < 16 then Exit;
+
+  for I := 0 to MaxLen - 16 do
   begin
     DWordPtr := PDWORD(@Buffer[I]);
     if DWordPtr^ = PFCQ_SIGNATURE then
@@ -146,13 +151,12 @@ begin
   end;
 end;
 
-
 function AnalyzePEAutoloaderFiles(SourceStream: TFileStream): TPEAutoloaderFileInfoArray;
 var
   PeEndOffset, SignaturePos: int64;
   FileCount, I: int64;
   Offsets: array of int64;
-  Buffer: array of byte;
+  Buffer: TBytes;
 begin
   PeEndOffset := GetPEEndOffset(SourceStream);
   if PeEndOffset = 0 then
@@ -164,9 +168,7 @@ begin
 
   SourceStream.Position := SignaturePos;
 
-  // Зчитуємо FileCount, офсети
   FileCount := ReadFileCount(SourceStream);
-  // функція, що читає коректно count (логіка з твого коду)
   if (FileCount < 1) or (FileCount > MAX_FILES) then
     raise Exception.CreateFmt('Invalid file count: %d (expected 1-%d)', [FileCount, MAX_FILES]);
 
@@ -188,14 +190,13 @@ begin
     Result[I].Size := Offsets[I + 1] - Offsets[I];
     Result[I].Index := I;
 
-    // Читаємо перші байти для визначення типу
     SourceStream.Position := Offsets[I];
     SetLength(Buffer, Min(64, Result[I].Size));
-    SourceStream.Read(Buffer[0], Length(Buffer));
+    if Length(Buffer) > 0 then
+      SourceStream.ReadBuffer(Buffer[0], Length(Buffer));
 
     Result[I].FileType := DetermineFileType(Buffer);
   end;
-
 end;
 
 function AnalyzePEAutoloaderFiles(const FileName: string): TPEAutoloaderFileInfoArray;
@@ -210,11 +211,9 @@ begin
   end;
 end;
 
-
 procedure ExtractPEAutoloaderFiles(const FileName: string; const Files: TPEAutoloaderFileInfoArray);
 var
-  SourceStream: TFileStream;
-  OutputFile: TFileStream;
+  SourceStream, OutputFile: TFileStream;
   OutputFileName: string;
   I: integer;
 begin
@@ -237,7 +236,7 @@ begin
 
       OutputFile := TFileStream.Create(OutputFileName, fmCreate);
       try
-        CopyStreamData(SourceStream, OutputFile, Files[I].Size);
+        OutputFile.CopyFrom(SourceStream, Files[I].Size);
         Writeln(Format('Extracted: %s (%s bytes)', [ExtractFileName(OutputFileName),
           FormatFloat('#,##0', Files[I].Size)]));
       finally
@@ -251,7 +250,6 @@ begin
   end;
 end;
 
-
 procedure ExtractBlackBerryAutoloaderFromPE(const FileName: string);
 var
   files: TPEAutoloaderFileInfoArray;
@@ -260,55 +258,67 @@ begin
   ExtractPEAutoloaderFiles(FileName, files);
 end;
 
-
 function GetCapSize(Stream: TStream): int64;
+var
+  PeEnd, SigPos: int64;
 begin
-  Result := GetPEEndOffset(Stream);
-  if Result = 0 then exit;
-  Result := FindSignature(Stream, Result) - 20;
-  if Result < 0 then Result := Stream.Size;
+  Result := Stream.Size;
+  PeEnd := GetPEEndOffset(Stream);
+  if PeEnd = 0 then Exit;
+
+  SigPos := FindSignature(Stream, PeEnd);
+  if SigPos >= 20 then
+    Result := SigPos - 20;
 end;
 
 function ExtractCap(inFile, outFile: string): boolean;
 var
   capSize: int64;
-  outStream: TFileStream;
-  cap: TFileStream;
+  outStream, cap: TFileStream;
 begin
+  Result := False;
   cap := TFileStream.Create(inFile, fmOpenRead or fmShareDenyWrite);
   try
     capSize := GetCapSize(cap);
-    if CapSize = cap.Size then Exit(False);
+    if capSize >= cap.Size then Exit;
+
     cap.Position := 0;
     outStream := TFileStream.Create(outFile, fmCreate or fmShareExclusive);
     try
       outStream.CopyFrom(cap, capSize);
+      Result := True;
     finally
-      FreeAndNil(outStream);
+      outStream.Free;
     end;
   finally
-    FreeAndNil(cap);
+    cap.Free;
   end;
-  Result := True;
 end;
-
 
 function MakeAutoloader(oFile: string; const iFiles: TStringList; capexe: string = 'cap.exe';
   ver: integer = 2; cb: TProgressCallback = nil): boolean;
 var
-  inStream: TFileStream;
-  outStream: TFileStream;
-  cap: TFileStream;
+  inStream, outStream, cap: TFileStream;
   off, capSize, xDelta: int64;
   i, c: integer;
+  fn: string;
 begin
+  Result := False;
+  if not FileExists(capexe) then
+    raise Exception.CreateFmt('Base stub binary not found: %s', [capexe]);
+
   cap := TFileStream.Create(capexe, fmOpenRead or fmShareDenyWrite);
   try
     capSize := GetPEEndOffset(cap);
+    if capSize = 0 then capSize := cap.Size;
+
     cap.Position := 0;
     outStream := TFileStream.Create(oFile, fmCreate or fmShareExclusive);
     try
+      // 1. Копіюємо PE-заглушку (cap.exe)
       outStream.CopyFrom(cap, capSize);
+
+      // 2. Пишемо сигнатуру
       outStream.WriteDWord(START_SIGNATURE_DWORD);
       outStream.WriteDWord(START_SIGNATURE_DWORD);
       outStream.WriteDWord(START_SIGNATURE_DWORD);
@@ -319,37 +329,49 @@ begin
         Inc(xDelta, 80);
         for i := 0 to 19 do
           outStream.WriteDWord(0);
-
       end;
 
       c := iFiles.Count;
       outStream.WriteDWord(c);
+
+      // 3. Розраховуємо та пишемо таблицю зміщень
       off := capSize + xDelta;
       for i := 0 to c - 1 do
       begin
-        outStream.WriteDWord(0);
-        outStream.WriteDWord(off);
-        Inc(off, FileSize(iFiles.Strings[i]));
+        fn := iFiles.Strings[i];
+        if not FileExists(fn) then
+          raise Exception.CreateFmt('Input image file not found: %s', [fn]);
+
+        outStream.WriteQWord(0);   // Reserved / Alignment
+        outStream.WriteQWord(off); // 64-бітне зміщення файлу
+        Inc(off, FileSize(fn));
       end;
+
+      // Вирівнюємо заголовок до необхідного розміру
       while outStream.Position < capSize + xDelta do
         outStream.WriteDWord(0);
 
+      // 4. Послідовно записуємо дані образиів
       for i := 0 to c - 1 do
       begin
-        inStream := TFileStream.Create(iFiles.Strings[i], fmOpenReadWrite or fmShareDenyWrite);
+        fn := iFiles.Strings[i];
+        inStream := TFileStream.Create(fn, fmOpenRead or fmShareDenyWrite);
         try
+          if Assigned(cb) then cb(fn, i, c);
           outStream.CopyFrom(inStream, inStream.Size);
         finally
-          FreeAndNil(inStream);
+          inStream.Free;
         end;
       end;
+
+      if Assigned(cb) then cb(oFile, c, c);
+      Result := True;
     finally
-      FreeAndNil(outStream);
+      outStream.Free;
     end;
   finally
-    FreeAndNil(cap);
+    cap.Free;
   end;
-  Result := True;
 end;
 
 end.
