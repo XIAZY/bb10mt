@@ -90,12 +90,16 @@ end;
 
 function TSplitCommand.Execute: integer;
 var
-  fileName: string;
+  fileName, outDir, tmpS: string;
 begin
   GetParameterValue('--input', fileName);
+  fileName := ExpandFileName(fileName);
+  outDir := '';
+  if GetParameterValue('--output', tmpS) then
+    outDir := tmpS;
   if FileExists(fileName) then
   begin
-    ExtractBlackBerryAutoloaderFromPE(fileName);
+    ExtractBlackBerryAutoloaderFromPE(fileName, outDir);
   end;
 end;
 
@@ -201,15 +205,20 @@ end;
 function TUnpackCommand.Execute: integer;
 var
   mfcqFile: TFileName;
+  outDir, tmpS: string;
 begin
   if not GetParameterValue('--container', mfcqFile) then
   begin
     TConsole.WriteLn('Error: qcfm container file is required', ccRed);
     Exit(5);
   end;
+  outDir := '';
+  if GetParameterValue('--output', tmpS) then
+    outDir := tmpS;
+
   TConsole.WriteLn('Extracting files...', ccCyan);
 
-  unpackMFCQ(ExpandFileName(mfcqFile), @qcfm_callback);
+  unpackMFCQ(ExpandFileName(mfcqFile), @qcfm_callback, outDir);
 end;
 
 function TAutoloaderCommand.Execute: integer;
@@ -291,7 +300,6 @@ begin
 
 end;
 
-
 initialization
   Pack := TPackCommand.Create('pack', 'pack file into qcfm container');
   Pack.AddPathParameter('-c', '--container', 'container file', True);
@@ -303,20 +311,22 @@ initialization
 
   UnPack := TUnPackCommand.Create('unpack', 'extract files from qcfm container');
   UnPack.AddPathParameter('-c', '--container', 'container file', True);
+  UnPack.AddPathParameter('-o', '--output', 'output dir');
 
   Split := TSplitCommand.Create('split', 'Split autoloader');
-  Split.AddPathParameter('-i', '--input', 'input files', True);
+  Split.AddPathParameter('-i', '--input', 'input file', True);
+  Split.AddPathParameter('-o', '--output', 'output dir');
 
   ALCreate := TALCreateCommand.Create('create', 'Create autoloader ');
   ALCreate.AddPathParameter('-o', '--output', 'Autoloader file', False, 'autoloader.exe');
-  ALCreate.AddPathParameter('-c', '--cap', 'own cap.exe file', False, 'cap.exe');
+  ALCreate.AddPathParameter('-c', '--cap', 'cap.exe file', False, 'cap.exe');
   ALCreate.AddArrayParameter('-i', '--input', 'input files');
   ALCreate.AddPathParameter('-l', '--list', 'input files list');
   ALCreate.AddIntegerParameter('-v', '--ver', 'cap tail version', False, '2');
 
   ALExtract := TALExtractCommand.Create('extract', 'Extract cap.exe from autoloader');
   ALExtract.AddPathParameter('-i', '--input', 'Autoloader file', True);
-  ALExtract.AddPathParameter('-c', '--cap', 'own cap.exe file', False, 'cap.exe');
+  ALExtract.AddPathParameter('-c', '--cap', 'output file', False, 'cap.exe');
 
   ALLoaders := TALLoadersCommand.Create('loaders', 'Extract RAM-loaders from CAP, CFP, autoloaders');
   ALLoaders.AddPathParameter('-i', '--input', 'cap.exe/cfp.exe file', True);

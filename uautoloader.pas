@@ -21,7 +21,7 @@ type
 
 function AnalyzePEAutoloaderFiles(SourceStream: TFileStream): TPEAutoloaderFileInfoArray; overload;
 function AnalyzePEAutoloaderFiles(const FileName: string): TPEAutoloaderFileInfoArray; overload;
-procedure ExtractBlackBerryAutoloaderFromPE(const FileName: string);
+procedure ExtractBlackBerryAutoloaderFromPE(const FileName: string; const OutDir: string = '');
 
 function MakeAutoloader(oFile: string; const iFiles: TStringList; capexe: string = 'cap.exe';
   ver: integer = 2; cb: TProgressCallback = nil): boolean;
@@ -211,13 +211,23 @@ begin
   end;
 end;
 
-procedure ExtractPEAutoloaderFiles(const FileName: string; const Files: TPEAutoloaderFileInfoArray);
+procedure ExtractPEAutoloaderFiles(const FileName: string; const Files: TPEAutoloaderFileInfoArray;
+  const OutDir: string = '');
 var
   SourceStream, OutputFile: TFileStream;
-  OutputFileName: string;
+  BaseFileName, TargetDir, OutputFileName: string;
   I: integer;
 begin
   if Length(Files) = 0 then Exit;
+
+  if OutDir <> '' then
+  begin
+    TargetDir := IncludeTrailingPathDelimiter(OutDir);
+    if not DirectoryExists(TargetDir) then
+      ForceDirectories(TargetDir);
+  end
+  else
+    TargetDir := ExtractFilePath(FileName);
 
   SourceStream := TFileStream.Create(FileName, fmOpenRead or fmShareDenyNone);
   try
@@ -232,7 +242,10 @@ begin
       end;
 
       SourceStream.Position := Files[I].Offset;
-      OutputFileName := ChangeFileExt(FileName, GetFileExtension(Files[I].FileType, Files[I].Index));
+
+      BaseFileName := ExtractFileName(ChangeFileExt(FileName,
+        GetFileExtension(Files[I].FileType, Files[I].Index)));
+      OutputFileName := TargetDir + BaseFileName;
 
       OutputFile := TFileStream.Create(OutputFileName, fmCreate);
       try
@@ -250,12 +263,12 @@ begin
   end;
 end;
 
-procedure ExtractBlackBerryAutoloaderFromPE(const FileName: string);
+procedure ExtractBlackBerryAutoloaderFromPE(const FileName: string; const OutDir: string = '');
 var
   files: TPEAutoloaderFileInfoArray;
 begin
   files := AnalyzePEAutoloaderFiles(FileName);
-  ExtractPEAutoloaderFiles(FileName, files);
+  ExtractPEAutoloaderFiles(FileName, files, OutDir);
 end;
 
 function GetCapSize(Stream: TStream): int64;

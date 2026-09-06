@@ -96,7 +96,7 @@ function AnalyzeMFCQChunks(const FileName: string): TMFCQChunkArrays;
 procedure Chunk2Stream(inFile: TStream; const chunk: TMFCQChunk; outFile: TStream;
   cb: TProgressCallback = nil; outFileName: string = '');
 
-procedure unpackMFCQ(fileName: string; cb: TProgressCallback = nil);
+procedure unpackMFCQ(fileName: string; cb: TProgressCallback = nil; const OutDir: string = '');
 procedure packMFCQ(oFile: string; const iFiles: TStringList; cb: TProgressCallback = nil;
   ver: integer = 2; fast: boolean = False);
 procedure _packMFCQ(outFile: TStream; const iFiles: TStringList; cb: TProgressCallback = nil;
@@ -756,18 +756,30 @@ begin
 end;
 
 procedure SaveMFCQChunksToFiles(const FileName: string; const Chunks: TMFCQChunkArrays;
-  cb: TProgressCallback = nil);
+  cb: TProgressCallback = nil; const OutDir: string = '');
 var
   inFile, outFile: TFileStream;
   lstFile: TStringList;
   bc, c, i: integer;
-  outFileName: string;
+  baseFileName, targetDir, outFileName, fullPath: string;
   v: integer = 0;
   firstRunOffset: int64;
 begin
   if Length(Chunks.V1) > 0 then v := v + 1;
   if Length(Chunks.V2) > 0 then v := v + 2;
   if v = 0 then Exit;
+
+  // Визначаємо цільову директорію для збереження
+  if OutDir <> '' then
+  begin
+    targetDir := IncludeTrailingPathDelimiter(OutDir);
+    if not DirectoryExists(targetDir) then
+      ForceDirectories(targetDir);
+  end
+  else
+    targetDir := ExtractFilePath(FileName);
+
+  baseFileName := ExtractFileName(FileName);
 
   inFile := TFileStream.Create(FileName, fmOpenRead or fmShareDenyNone);
   try
@@ -782,31 +794,35 @@ begin
       begin
         if v > 1 then
         begin
-          outFileName := ChangeFileExt(FileName, '.' + IntToStr(i) + Chunks.V2[i].ChunkType);
+          outFileName := ChangeFileExt(baseFileName, '.' + IntToStr(i) + Chunks.V2[i].ChunkType);
           bc := Chunks.V2[i].BlockCount;
         end
         else
         begin
-          outFileName := ChangeFileExt(FileName, '.' + IntToStr(i) + Chunks.V1[i].ChunkType);
+          outFileName := ChangeFileExt(baseFileName, '.' + IntToStr(i) + Chunks.V1[i].ChunkType);
           bc := Chunks.V1[i].BlockCount;
         end;
 
-        outFile := TFileStream.Create(outFileName, fmCreate);
+        // Повний шлях для створення вихідного файлу
+        fullPath := targetDir + outFileName;
+
+        outFile := TFileStream.Create(fullPath, fmCreate);
         try
           if (v and 1) = 1 then
           begin
-            Chunk2Stream(inFile, Chunks.V1[i], outFile, cb, outFileName);
+            Chunk2Stream(inFile, Chunks.V1[i], outFile, cb, fullPath);
 
-            // Безпечна перевірка наявність елемента у масиві RR
+            // Безпечна перевірка наявності елемента у масиві RR
             firstRunOffset := 0;
             if Length(Chunks.V1[i].RR) > 0 then
               firstRunOffset := Chunks.V1[i].RR[0].Offset;
 
+            // Формуємо відносне ім'я для списку lst з метаданими
             outFileName := outFileName + '=' + IntToStr(firstRunOffset) + ',' +
               IntToStr(Chunks.V1[i].Flags);
           end
           else
-            Chunk2Stream(inFile, Chunks.V2[i], outFile, cb, outFileName);
+            Chunk2Stream(inFile, Chunks.V2[i], outFile, cb, fullPath);
 
           lstFile.Add(outFileName);
         finally
@@ -819,7 +835,9 @@ begin
           WriteLn;
         end;
       end;
-      lstFile.SaveToFile(ChangeFileExt(FileName, '.lst'));
+
+      // Зберігаємо .lst у цільову директорію
+      lstFile.SaveToFile(targetDir + ChangeFileExt(baseFileName, '.lst'));
     finally
       FreeAndNil(lstFile);
     end;
@@ -828,12 +846,12 @@ begin
   end;
 end;
 
-procedure unpackMFCQ(fileName: string; cb: TProgressCallback = nil);
+procedure unpackMFCQ(fileName: string; cb: TProgressCallback = nil; const OutDir: string = '');
 var
   chunks: TMFCQChunkArrays;
 begin
   chunks := AnalyzeMFCQChunks(fileName);
-  SaveMFCQChunksToFiles(fileName, chunks, cb);
+  SaveMFCQChunksToFiles(fileName, chunks, cb, OutDir);
 end;
 
 end.

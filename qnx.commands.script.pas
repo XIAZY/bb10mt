@@ -81,81 +81,88 @@ type
     function Execute(const Args: array of string): integer; override;
   end;
 
-
 function ApplyChmod(FS: TQNX6Fs; const Path: string; Mode: integer; Recursive: boolean): integer;
 function ApplyChown(FS: TQNX6Fs; const Path: string; Uid, Gid: integer; Recursive: boolean): integer;
 
 implementation
 
-uses CLI.Console;
+uses
+  CLI.Console;
 
-function ApplyChmodByInode(FS: TQNX6Fs; idx: DWord; const Path: string; Mode: integer;
-  Recursive: boolean): integer; forward;
+const
+  PATH_REGISTERED_APPS = '/var/pps/system/installer/registeredapps/applications';
+  PATH_APP_DETAILS      = '/var/pps/system/installer/appdetails';
+  PATH_APPS             = '/apps';
+
+type
+  TRegList = record
+    Name: string;
+    Data: TStringList;
+    Changed: boolean;
+  end;
+
+{ Private Helper Functions }
+
+function ApplyChmodByInode(FS: TQNX6Fs; Idx: DWord; const Path: string; Mode: integer; Recursive: boolean): integer; forward;
 
 function ApplyChmod(FS: TQNX6Fs; const Path: string; Mode: integer; Recursive: boolean): integer;
 var
-  idx: DWord;
+  Idx: DWord;
 begin
   Result := -1;
   if FS = nil then Exit;
 
-  // Резолвимо шлях у inode РІВНО ОДИН РАЗ — тут, на вході.
-  idx := FS.GetInodeByPath(PChar(Path));
-  if idx = 0 then
+  Idx := FS.GetInodeByPath(PChar(Path));
+  if Idx = 0 then
   begin
-    TConsole.WriteLn(Format('chmod error: path "%s" not found', [Path]));
+    TConsole.WriteLn(Format('chmod: [ERROR] Path "%s" not found', [Path]));
     Exit;
   end;
-  TConsole.WriteLn(Format('chmod: mode set to %s for "%s"', [OctStr(Mode and $0FFF, 4), Path]));
+  TConsole.WriteLn(Format('chmod: [INFO] Mode set to %s for "%s"', [OctStr(Mode and $0FFF, 4), Path]));
 
-  Result := ApplyChmodByInode(FS, idx, Path, Mode, Recursive);
+  Result := ApplyChmodByInode(FS, Idx, Path, Mode, Recursive);
 end;
 
-function ApplyChmodByInode(FS: TQNX6Fs; idx: DWord; const Path: string; Mode: integer;
-  Recursive: boolean): integer;
+function ApplyChmodByInode(FS: TQNX6Fs; Idx: DWord; const Path: string; Mode: integer; Recursive: boolean): integer;
 var
-  i, c: integer;
-  inode: TQNX6_DInode;
+  I, Count: integer;
+  Inode: TQNX6_DInode;
   RDI: TQNX6_ARawDirEntry;
   Name, ChildPath, BasePath: string;
-  hadError: boolean;
+  HadError: boolean;
 begin
-  hadError := False;
-  inode := FS.GetInode(idx);
+  HadError := False;
+  Inode := FS.GetInode(Idx);
 
-  if Recursive and FpS_ISDIR(inode.mode) then
+  if Recursive and FpS_ISDIR(Inode.mode) then
   begin
-    //    TConsole.WriteLn(Format('chmod: mode set to %s for "%s"', [OctStr(Mode and $0FFF, 4), Path]));
-    c := FS.ReadDirectory(idx, RDI);
-    if c < 0 then
+    Count := FS.ReadDirectory(Idx, RDI);
+    if Count < 0 then
     begin
-      TConsole.WriteLn(Format('chmod error: cannot read directory "%s"', [Path]));
-      hadError := True;
+      TConsole.WriteLn(Format('chmod: [ERROR] Cannot read directory "%s"', [Path]));
+      HadError := True;
     end
-    else if c > 0 then
+    else if Count > 0 then
     begin
       BasePath := EnsurePOSIXTrailingSlash(Path);
-      for i := 0 to Pred(c) do
+      for I := 0 to Pred(Count) do
       begin
-        Name := FS.RawDirEntryGetName(RDI[i]);
+        Name := FS.RawDirEntryGetName(RDI[I]);
         if (Name <> '.') and (Name <> '..') then
         begin
           ChildPath := BasePath + Name;
-          // лише для логів/повідомлень про помилки
-          // ВИПРАВЛЕНО: не резолвимо ChildPath через GetInodeByPath —
-          // inode дочірнього елемента вже відомий з RDI[i].inode.
-          if ApplyChmodByInode(FS, RDI[i].inode, ChildPath, Mode, True) <> 0 then
-            hadError := True;
+          if ApplyChmodByInode(FS, RDI[I].inode, ChildPath, Mode, True) <> 0 then
+            HadError := True;
         end;
       end;
     end;
     SetLength(RDI, 0);
   end;
 
-  inode.mode := (inode.mode and not $0FFF) or (Mode and $0FFF);
-  FS.SetInode(idx, inode);
+  Inode.mode := (Inode.mode and not $0FFF) or (Mode and $0FFF);
+  FS.SetInode(Idx, Inode);
 
-  if hadError then
+  if HadError then
     Result := -1
   else
     Result := 0;
@@ -163,33 +170,32 @@ end;
 
 function ApplyChown(FS: TQNX6Fs; const Path: string; Uid, Gid: integer; Recursive: boolean): integer;
 var
-  idx: DWord;
-  i, c: integer;
-  inode: TQNX6_DInode;
+  Idx: DWord;
+  I, Count: integer;
+  Inode: TQNX6_DInode;
   RDI: TQNX6_ARawDirEntry;
   Name, ChildPath, BasePath: string;
 begin
   Result := -1;
   if FS = nil then Exit;
 
-  idx := FS.GetInodeByPath(PChar(Path));
-  if idx > 0 then
+  Idx := FS.GetInodeByPath(PChar(Path));
+  if Idx > 0 then
   begin
-    inode := FS.GetInode(idx);
+    Inode := FS.GetInode(Idx);
 
-    if Recursive and FpS_ISDIR(inode.mode) then
+    if Recursive and FpS_ISDIR(Inode.mode) then
     begin
-      c := FS.ReadDirectory(idx, RDI);
-      if c > 0 then
+      Count := FS.ReadDirectory(Idx, RDI);
+      if Count > 0 then
       begin
         BasePath := EnsurePOSIXTrailingSlash(Path);
-        for i := 0 to Pred(c) do
+        for I := 0 to Pred(Count) do
         begin
-          Name := FS.RawDirEntryGetName(RDI[i]);
+          Name := FS.RawDirEntryGetName(RDI[I]);
           if (Name <> '.') and (Name <> '..') then
           begin
             ChildPath := BasePath + Name;
-            // Передаємо True для рекурсивних викликів всередині
             ApplyChown(FS, ChildPath, Uid, Gid, True);
           end;
         end;
@@ -197,24 +203,23 @@ begin
       SetLength(RDI, 0);
     end;
 
-    if Uid <> -1 then inode.uid := cardinal(Uid);
-    if Gid <> -1 then inode.gid := cardinal(Gid);
+    if Uid <> -1 then Inode.uid := Cardinal(Uid);
+    if Gid <> -1 then Inode.gid := Cardinal(Gid);
 
-    FS.SetInode(idx, inode);
+    FS.SetInode(Idx, Inode);
 
-    // Виводимо лог для конкретного файлу/папки лише у нерекурсивному режимі
     if not Recursive then
-      TConsole.WriteLn(Format('chown: owner/group set to %d:%d for "%s"', [Uid, Gid, Path]));
+      TConsole.WriteLn(Format('chown: [INFO] Owner/group set to %d:%d for "%s"', [Uid, Gid, Path]));
 
     Result := 0;
   end
   else
-    TConsole.WriteLn(Format('chown error: path "%s" not found', [Path]));
+    TConsole.WriteLn(Format('chown: [ERROR] Path "%s" not found', [Path]));
 end;
 
-function ReplaceInStream(Stream: TMemoryStream; const OldStr, NewStr: rawbytestring): boolean;
+function ReplaceInStream(Stream: TMemoryStream; const OldStr, NewStr: RawByteString): boolean;
 var
-  DataStr, ModifiedStr: rawbytestring;
+  DataStr, ModifiedStr: RawByteString;
 begin
   Result := False;
   if (Stream = nil) or (Stream.Size = 0) or (OldStr = '') then Exit;
@@ -234,6 +239,26 @@ begin
   end;
 
   Stream.Position := 0;
+end;
+
+function LoadPPSList(FS: TQNX6Fs; const FilePath: string; TargetList: TStringList; Stream: TMemoryStream): boolean;
+begin
+  Result := False;
+  Stream.Clear;
+  if qnx6_readFile(FS, FilePath, Stream) = 0 then
+  begin
+    Stream.Position := 0;
+    TargetList.LoadFromStream(Stream);
+    Result := True;
+  end;
+end;
+
+function SavePPSList(FS: TQNX6Fs; const FilePath: string; SourceList: TStringList; Stream: TMemoryStream): boolean;
+begin
+  Stream.Clear;
+  SourceList.SaveToStream(Stream);
+  Stream.Position := 0;
+  Result := qnx6_writeFile(FS, FilePath, Stream) = 0;
 end;
 
 { TMkDirCommand }
@@ -264,8 +289,8 @@ begin
   end
   else
   begin
-    TConsole.WriteLn('Error: Wrong arguments count.');
-    TConsole.WriteLn('Usage: mkdir [-p] <directory_path>');
+    TConsole.WriteLn('[ERROR] Invalid argument count.');
+    TConsole.WriteLn('[USAGE] mkdir [-p] <directory_path>');
     Exit(1);
   end;
 
@@ -275,11 +300,152 @@ begin
 
   if qnx6_MkDir(FFS, TargetDir, IsRecursive) then
   begin
-    TConsole.WriteLn('Successfully created directory: "' + TargetDir + '"');
+    TConsole.WriteLn(Format('[INFO] Successfully created directory "%s"', [TargetDir]));
     Result := 0;
   end
   else
-    TConsole.WriteLn('Error: Failed to create directory "' + TargetDir + '"');
+    TConsole.WriteLn(Format('[ERROR] Failed to create directory "%s"', [TargetDir]));
+end;
+
+{ TPushCommand }
+
+constructor TPushCommand.Create(const AName, AHelp, AUsage: string; AFS: TQNX6Fs);
+begin
+  inherited Create(AName, AHelp, AUsage);
+  FFS := AFS;
+end;
+
+function TPushCommand.Execute(const Args: array of string): integer;
+var
+  SrcPath, DstPath, InPath, OutPath, RelPath: string;
+  DirList: TStringList;
+  Stream: TMemoryStream;
+  IsDir: boolean;
+  CopiedCount: integer;
+begin
+  Result := -1;
+
+  if Length(Args) <> 2 then
+  begin
+    TConsole.WriteLn('[ERROR] Invalid argument count.');
+    TConsole.WriteLn('[USAGE] push <local_src_path> <qnx_dst_path>');
+    Exit(1);
+  end;
+
+  SrcPath := ExpandFileName(Args[0]);
+  IsDir := DirectoryExists(SrcPath);
+
+  if not IsDir and not FileExists(SrcPath) then
+  begin
+    TConsole.WriteLn(Format('[ERROR] Source path "%s" does not exist', [SrcPath]));
+    Exit(2);
+  end;
+
+  DstPath := Args[1];
+  if (DstPath = '') or (DstPath[1] <> '/') then
+    DstPath := '/' + DstPath;
+
+  if not IsDir then
+  begin
+    if DstPath.EndsWith('/') then
+    begin
+      qnx6_MkDir(FFS, DstPath, True);
+      DstPath := DstPath + ExtractFileName(SrcPath);
+    end
+    else
+      qnx6_MkDir(FFS, ExtractPOSIXFilePath(DstPath), True);
+
+    Stream := TMemoryStream.Create;
+    try
+      try
+        Stream.LoadFromFile(SrcPath);
+        FFS.CreateFile(PChar(DstPath), &666);
+        if qnx6_writeFile(FFS, DstPath, Stream) <> 0 then
+        begin
+          TConsole.WriteLn(Format('[ERROR] Failed to write file "%s"', [DstPath]));
+          Exit(3);
+        end;
+        TConsole.WriteLn(Format('[INFO] Pushed file "%s" -> "%s"', [SrcPath, DstPath]));
+      except
+        on E: Exception do
+        begin
+          TConsole.WriteLn(Format('[ERROR] Failed to copy file: %s', [E.Message]));
+          Exit(4);
+        end;
+      end;
+    finally
+      FreeAndNil(Stream);
+    end;
+
+    Exit(0);
+  end;
+
+  TConsole.WriteLn(Format('[INFO] Pushing directory structure from "%s" to "%s"...', [SrcPath, DstPath]));
+  qnx6_MkDir(FFS, DstPath, True);
+
+  DirList := FindAllDirectories(SrcPath);
+  try
+    if Assigned(DirList) then
+    begin
+      for InPath in DirList do
+      begin
+        RelPath := ExtractRelativePath(IncludeTrailingPathDelimiter(SrcPath), InPath);
+        if (RelPath = '') or (RelPath = '.') then Continue;
+
+        OutPath := Path2QNX(EnsurePOSIXTrailingSlash(DstPath) + RelPath);
+        qnx6_MkDir(FFS, OutPath, True);
+        TConsole.WriteLn(Format('[INFO] Created directory "%s"', [OutPath]));
+      end;
+    end;
+  finally
+    FreeAndNil(DirList);
+  end;
+
+  CopiedCount := 0;
+  Stream := TMemoryStream.Create;
+  try
+    try
+      DirList := FindAllFiles(SrcPath, '*');
+      if Assigned(DirList) then
+      begin
+        for InPath in DirList do
+        begin
+          RelPath := ExtractRelativePath(IncludeTrailingPathDelimiter(SrcPath), InPath);
+          OutPath := Path2QNX(EnsurePOSIXTrailingSlash(DstPath) + RelPath);
+
+          qnx6_MkDir(FFS, ExtractPOSIXFilePath(OutPath), True);
+
+          FFS.CreateFile(PChar(OutPath), &666);
+          try
+            Stream.Clear;
+            Stream.LoadFromFile(InPath);
+            if qnx6_writeFile(FFS, OutPath, Stream) <> 0 then
+              TConsole.WriteLn(Format('[ERROR] Failed to write file "%s"', [OutPath]))
+            else
+            begin
+              TConsole.WriteLn(Format('[INFO] Pushed "%s" -> "%s"', [RelPath, OutPath]));
+              Inc(CopiedCount);
+            end;
+          except
+            on E: Exception do
+              TConsole.WriteLn(Format('[ERROR] Failed to read local file "%s": %s', [InPath, E.Message]));
+          end;
+        end;
+      end;
+      TConsole.WriteLn(Format('[INFO] Push completed. Total files pushed: %d', [CopiedCount]));
+    except
+      on E: Exception do
+      begin
+        TConsole.WriteLn(Format('[ERROR] Directory scanning error: %s', [E.Message]));
+        Exit(5);
+      end;
+    end;
+  finally
+    FreeAndNil(DirList);
+    FreeAndNil(Stream);
+  end;
+
+  Result := 0;
 end;
 
 { TTouchCommand }
@@ -300,8 +466,8 @@ begin
     Target := Args[0]
   else
   begin
-    TConsole.WriteLn('Error: Wrong arguments count.');
-    TConsole.WriteLn('Usage: touch <file name>');
+    TConsole.WriteLn('[ERROR] Invalid argument count.');
+    TConsole.WriteLn('[USAGE] touch <file_name>');
     Exit(1);
   end;
 
@@ -311,151 +477,11 @@ begin
 
   if FFS.CreateFile(PChar(Target), &666) = 0 then
   begin
-    TConsole.WriteLn('Successfully touched file: "' + Target + '"');
+    TConsole.WriteLn(Format('[INFO] Successfully touched file "%s"', [Target]));
     Result := 0;
   end
   else
-    TConsole.WriteLn('Error: Failed to create file "' + Target + '"');
-end;
-
-{ TPushCommand }
-
-constructor TPushCommand.Create(const AName, AHelp, AUsage: string; AFS: TQNX6Fs);
-begin
-  inherited Create(AName, AHelp, AUsage);
-  FFS := AFS;
-end;
-
-function TPushCommand.Execute(const Args: array of string): integer;
-var
-  src, dst, inPath, outPath, relPath: string;
-  DL: TStringList;
-  Stream: TMemoryStream;
-  isDir: boolean;
-  CopiedCount: integer;
-begin
-  Result := -1;
-
-  if Length(Args) <> 2 then
-  begin
-    TConsole.WriteLn('Usage: push <local_src_path> <qnx_dst_path>');
-    Exit(1);
-  end;
-
-  src := ExpandFileName(Args[0]);
-  isDir := DirectoryExists(src);
-
-  if not isDir and not FileExists(src) then
-  begin
-    TConsole.WriteLn('Error: Source path "' + src + '" does not exist.');
-    Exit(2);
-  end;
-
-  dst := Args[1];
-  if (dst = '') or (dst[1] <> '/') then
-    dst := '/' + dst;
-
-  if not isDir then
-  begin
-    if dst.EndsWith('/') then
-    begin
-      qnx6_MkDir(FFS, dst, True);
-      dst := dst + ExtractFileName(src);
-    end
-    else
-      qnx6_MkDir(FFS, ExtractPOSIXFilePath(dst), True);
-
-    Stream := TMemoryStream.Create;
-    try
-      try
-        Stream.LoadFromFile(src);
-        FFS.CreateFile(PChar(dst), &666);
-        if qnx6_writeFile(FFS, dst, Stream) <> 0 then
-        begin
-          TConsole.WriteLn('Failed to write file: ' + dst);
-          Exit(3);
-        end;
-        TConsole.WriteLn('Pushed file: "' + src + '" -> "' + dst + '"');
-      except
-        on E: Exception do
-        begin
-          TConsole.WriteLn('Error copying file: ' + E.Message);
-          Exit(4);
-        end;
-      end;
-    finally
-      FreeAndNil(Stream);
-    end;
-
-    Exit(0);
-  end;
-
-  TConsole.WriteLn('Pushing directory structure from "' + src + '" to "' + dst + '"...');
-  qnx6_MkDir(FFS, dst, True);
-
-  DL := FindAllDirectories(src);
-  try
-    if Assigned(DL) then
-    begin
-      for inPath in DL do
-      begin
-        relPath := ExtractRelativePath(IncludeTrailingPathDelimiter(src), inPath);
-        if (relPath = '') or (relPath = '.') then Continue;
-
-        outPath := Path2QNX(EnsurePOSIXTrailingSlash(dst) + relPath);
-        qnx6_MkDir(FFS, outPath, True);
-        TConsole.WriteLn('Created directory: ' + outPath);
-      end;
-    end;
-  finally
-    FreeAndNil(DL);
-  end;
-
-  CopiedCount := 0;
-  Stream := TMemoryStream.Create;
-  try
-    try
-      DL := FindAllFiles(src, '*');
-      if Assigned(DL) then
-      begin
-        for inPath in DL do
-        begin
-          relPath := ExtractRelativePath(IncludeTrailingPathDelimiter(src), inPath);
-          outPath := Path2QNX(EnsurePOSIXTrailingSlash(dst) + relPath);
-
-          qnx6_MkDir(FFS, ExtractPOSIXFilePath(outPath), True);
-
-          FFS.CreateFile(PChar(outPath), &666);
-          try
-            Stream.Clear;
-            Stream.LoadFromFile(inPath);
-            if qnx6_writeFile(FFS, outPath, Stream) <> 0 then
-              TConsole.WriteLn('Failed to write file: ' + outPath)
-            else
-            begin
-              TConsole.WriteLn('Pushed: ' + relPath + ' -> ' + outPath);
-              Inc(CopiedCount);
-            end;
-          except
-            on E: Exception do
-              TConsole.WriteLn('Error reading local file "' + inPath + '": ' + E.Message);
-          end;
-        end;
-      end;
-      TConsole.WriteLn(Format('Push completed. Total files pushed: %d', [CopiedCount]));
-    except
-      on E: Exception do
-      begin
-        TConsole.WriteLn('Error during directory file scanning: ' + E.Message);
-        Exit(5);
-      end;
-    end;
-  finally
-    FreeAndNil(DL);
-    FreeAndNil(Stream);
-  end;
-
-  Result := 0;
+    TConsole.WriteLn(Format('[ERROR] Failed to create file "%s"', [Target]));
 end;
 
 { TChmodCommand }
@@ -469,9 +495,8 @@ end;
 function TChmodCommand.Execute(const Args: array of string): integer;
 var
   Mode: integer;
-  TargetFile: string;
+  TargetFile, ModeStr: string;
   IsRecursive: boolean;
-  ModeStr: string;
 begin
   IsRecursive := False;
   ModeStr := '';
@@ -490,8 +515,8 @@ begin
   end
   else
   begin
-    TConsole.WriteLn('Error: Wrong arguments count.');
-    TConsole.WriteLn('Usage: chmod [-R] <mode> <filename/directory>');
+    TConsole.WriteLn('[ERROR] Invalid argument count.');
+    TConsole.WriteLn('[USAGE] chmod [-R] <mode> <filename/directory>');
     Exit(1);
   end;
 
@@ -503,7 +528,7 @@ begin
   except
     on E: EConvertError do
     begin
-      TConsole.WriteLn('Error: Wrong mode format "' + ModeStr + '". Use octal format (e.g., 755).');
+      TConsole.WriteLn(Format('[ERROR] Invalid mode format "%s". Use octal (e.g., 755).', [ModeStr]));
       Exit(2);
     end;
   end;
@@ -512,13 +537,13 @@ begin
   if Result = 0 then
   begin
     if IsRecursive then
-      TConsole.WriteLn(Format('chmod: recursively applied mode %s to "%s"',
+      TConsole.WriteLn(Format('chmod: [INFO] Recursively applied mode %s to "%s"',
         [OctStr(Mode and $0FFF, 4), TargetFile]))
     else
-      TConsole.WriteLn('chmod operation completed successfully.');
+      TConsole.WriteLn('chmod: [INFO] Operation completed successfully');
   end
   else
-    TConsole.WriteLn('chmod operation failed.');
+    TConsole.WriteLn('chmod: [ERROR] Operation failed');
 end;
 
 { TChownCommand }
@@ -565,10 +590,8 @@ end;
 function TChownCommand.Execute(const Args: array of string): integer;
 var
   Uid, Gid: integer;
-  TargetFile: string;
-  IsRecursive: boolean;
-  OwnerGroupStr: string;
-  IsValidFormat: boolean;
+  TargetFile, OwnerGroupStr: string;
+  IsRecursive, IsValidFormat: boolean;
 begin
   IsRecursive := False;
   OwnerGroupStr := '';
@@ -587,15 +610,15 @@ begin
   end
   else
   begin
-    TConsole.WriteLn('Error: Wrong arguments count.');
-    TConsole.WriteLn('Usage: chown [-R] [owner][:group] <filename/directory>');
+    TConsole.WriteLn('[ERROR] Invalid argument count.');
+    TConsole.WriteLn('[USAGE] chown [-R] [owner][:group] <filename/directory>');
     Exit(1);
   end;
 
   ParseOwnerGroup(OwnerGroupStr, Uid, Gid, IsValidFormat);
   if not IsValidFormat then
   begin
-    TConsole.WriteLn('Error: Wrong owner/group format "' + OwnerGroupStr + '"');
+    TConsole.WriteLn(Format('[ERROR] Invalid owner/group format "%s"', [OwnerGroupStr]));
     Exit(2);
   end;
 
@@ -603,13 +626,13 @@ begin
   if Result = 0 then
   begin
     if IsRecursive then
-      TConsole.WriteLn(Format('chown: recursively applied owner/group %d:%d to "%s"',
+      TConsole.WriteLn(Format('chown: [INFO] Recursively applied owner/group %d:%d to "%s"',
         [Uid, Gid, TargetFile]))
     else
-      TConsole.WriteLn('chown operation completed successfully.');
+      TConsole.WriteLn('chown: [INFO] Operation completed successfully');
   end
   else
-    TConsole.WriteLn('chown operation failed.');
+    TConsole.WriteLn('chown: [ERROR] Operation failed');
 end;
 
 { TReplaceCommand }
@@ -622,48 +645,47 @@ end;
 
 function TReplaceCommand.Execute(const Args: array of string): integer;
 var
-  TargetFile, sOld, sNew: string;
-  msData: TMemoryStream;
+  TargetFile, OldVal, NewVal: string;
+  MS: TMemoryStream;
 begin
   if Length(Args) <> 3 then
   begin
-    TConsole.WriteLn('Error: Wrong arguments count.');
-    TConsole.WriteLn('Usage: replace <filename/directory> <old value> <new value>');
+    TConsole.WriteLn('[ERROR] Invalid argument count.');
+    TConsole.WriteLn('[USAGE] replace <file> <old_value> <new_value>');
     Exit(1);
   end;
 
   TargetFile := Args[0];
-  sOld := Args[1];
-  sNew := Args[2];
+  OldVal := Args[1];
+  NewVal := Args[2];
 
-  TConsole.WriteLn(Format('Replacing "%s" with "%s" in file "%s"...', [sOld, sNew, TargetFile]));
+  TConsole.WriteLn(Format('[INFO] Replacing "%s" with "%s" in file "%s"...', [OldVal, NewVal, TargetFile]));
 
-  msData := TMemoryStream.Create;
+  MS := TMemoryStream.Create;
   try
-    if qnx6_readFile(FFS, TargetFile, msData) <> 0 then
+    if qnx6_readFile(FFS, TargetFile, MS) <> 0 then
     begin
-      TConsole.WriteLn(Format('Error: File "%s" not found or cannot be read.', [TargetFile]));
+      TConsole.WriteLn(Format('[ERROR] File "%s" not found or unreadable', [TargetFile]));
       Exit(1);
     end;
 
-    if ReplaceInStream(msData, sOld, sNew) then
+    if ReplaceInStream(MS, OldVal, NewVal) then
     begin
-      if qnx6_writeFile(FFS, TargetFile, msData) <> 0 then
+      if qnx6_writeFile(FFS, TargetFile, MS) <> 0 then
       begin
-        TConsole.WriteLn(Format('Error: File "%s" write error.', [TargetFile]));
+        TConsole.WriteLn(Format('[ERROR] Write error for file "%s"', [TargetFile]));
         Exit(1);
       end;
-      TConsole.WriteLn(Format('Success: File "%s" updated.', [TargetFile]));
+      TConsole.WriteLn(Format('[INFO] Successfully updated file "%s"', [TargetFile]));
     end
     else
     begin
-      TConsole.WriteLn(Format('Notice: Target string "%s" was not found in "%s". File unchanged.',
-        [sOld, TargetFile]));
+      TConsole.WriteLn(Format('[NOTICE] Target string "%s" not found in "%s". File unchanged.', [OldVal, TargetFile]));
     end;
 
     Result := 0;
   finally
-    FreeAndNil(msData);
+    FreeAndNil(MS);
   end;
 end;
 
@@ -675,181 +697,138 @@ begin
   FFS := AFS;
 end;
 
-const
-  PATH_REGISTERED_APPS = '/var/pps/system/installer/registeredapps/applications';
-  PATH_APP_DETAILS = '/var/pps/system/installer/appdetails';
-  PATH_APPS = '/apps';
-
-type
-  TRegList = record
-    Name: string;
-    Data: TStringList;
-    Changed: boolean;
-  end;
-
-
-// Допоміжна функція для завантаження TStringList через TMemoryStream
-function LoadPPSList(FS: TQNX6Fs; const FilePath: string; TargetList: TStringList;
-  Stream: TMemoryStream): boolean;
-begin
-  Result := False;
-  Stream.Clear;
-  if qnx6_readFile(FS, FilePath, Stream) = 0 then
-  begin
-    Stream.Position := 0;
-    TargetList.LoadFromStream(Stream);
-    Result := True;
-  end;
-end;
-
-// Допоміжна функція для збереження TStringList через TMemoryStream
-function SavePPSList(FS: TQNX6Fs; const FilePath: string; SourceList: TStringList;
-  Stream: TMemoryStream): boolean;
-begin
-  Stream.Clear;
-  SourceList.SaveToStream(Stream);
-  Stream.Position := 0;
-  Result := qnx6_writeFile(FS, FilePath, Stream) = 0;
-end;
-
 function TRemoveAppCommand.Execute(const Args: array of string): integer;
 var
-  i, j, k: integer;
+  I, J, K: integer;
   BlackList, Registered: TStringList;
   Details: array of TRegList;
-  blacklisted_app, AppPath, CleanArg: string;
-  app_details, apps: TDirEntryInfoArray;
-  ms: TMemoryStream;
+  BlacklistedApp, AppPath, CleanArg: string;
+  AppDetailsEntries, AppsEntries: TDirEntryInfoArray;
+  MS: TMemoryStream;
   FoundInApps, RegChanged: boolean;
 begin
   Result := -1;
 
   if FFS = nil then
   begin
-    TConsole.WriteLn('Error: File system context is not initialized.');
+    TConsole.WriteLn('[ERROR] File system context is not initialized.');
     Exit;
   end;
 
   BlackList := TStringList.Create;
   Registered := TStringList.Create;
-  ms := TMemoryStream.Create;
+  MS := TMemoryStream.Create;
   try
-    // 1. Парсинг аргументів
-    for i := 0 to Length(Args) - 1 do
+    for I := 0 to Length(Args) - 1 do
     begin
-      CleanArg := Trim(Args[i]);
+      CleanArg := Trim(Args[I]);
       if CleanArg <> '' then
         BlackList.Add(CleanArg);
     end;
 
     if BlackList.Count = 0 then
     begin
-      TConsole.WriteLn('Usage: removeapp <app_name_1> [<app_name_2> ...]');
+      TConsole.WriteLn('[ERROR] Invalid argument count.');
+      TConsole.WriteLn('[USAGE] removeapp <app_name_1> [<app_name_2> ...]');
       Exit(1);
     end;
 
-    // 2. Зчитування registeredapps
-    LoadPPSList(FFS, PATH_REGISTERED_APPS, Registered, ms);
+    LoadPPSList(FFS, PATH_REGISTERED_APPS, Registered, MS);
 
-    // 3. Зчитування appdetails
-    if qnx6_readDir(FFS, PATH_APP_DETAILS, app_details) <> 0 then
+    if qnx6_readDir(FFS, PATH_APP_DETAILS, AppDetailsEntries) <> 0 then
     begin
-      TConsole.WriteLn('Error: Unable to read ' + PATH_APP_DETAILS);
+      TConsole.WriteLn(Format('[ERROR] Unable to read directory "%s"', [PATH_APP_DETAILS]));
       Exit;
     end;
 
-    SetLength(Details, Length(app_details));
-    for i := 0 to High(app_details) do
+    SetLength(Details, Length(AppDetailsEntries));
+    for I := 0 to High(AppDetailsEntries) do
     begin
-      Details[i].Name := app_details[i].Name;
-      Details[i].Data := TStringList.Create;
-      Details[i].Changed := False;
+      Details[I].Name := AppDetailsEntries[I].Name;
+      Details[I].Data := TStringList.Create;
+      Details[I].Changed := False;
 
-      LoadPPSList(FFS, PATH_APP_DETAILS + '/' + Details[i].Name, Details[i].Data, ms);
+      LoadPPSList(FFS, PATH_APP_DETAILS + '/' + Details[I].Name, Details[I].Data, MS);
     end;
 
-    // 4. Зчитування каталогу /apps та початок обробки
-    if qnx6_readDir(FFS, PATH_APPS, apps) = 0 then
+    if qnx6_readDir(FFS, PATH_APPS, AppsEntries) = 0 then
     begin
-      TConsole.WriteLn(Format('Starting application removal for %d targets...', [BlackList.Count]));
+      TConsole.WriteLn(Format('[INFO] Starting application removal process for %d target(s)...', [BlackList.Count]));
       RegChanged := False;
 
-      // --- ОСНОВНА ОБРОБКА В ПАМ'ЯТІ ---
-      for blacklisted_app in BlackList do
+      for BlacklistedApp in BlackList do
       begin
-        // Очищення Registered
-        for j := Registered.Count - 1 downto 0 do
+        for J := Registered.Count - 1 downto 0 do
         begin
-          if Pos(blacklisted_app, Registered[j]) > 0 then
+          if Pos(BlacklistedApp, Registered[J]) > 0 then
           begin
-            Registered.Delete(j);
+            Registered.Delete(J);
             RegChanged := True;
           end;
         end;
 
-        // Очищення Details
-        for j := 0 to High(Details) do
+        for J := 0 to High(Details) do
         begin
-          for k := Details[j].Data.Count - 1 downto 0 do
+          for K := Details[J].Data.Count - 1 downto 0 do
           begin
-            if Pos(blacklisted_app, Details[j].Data[k]) > 0 then
+            if Pos(BlacklistedApp, Details[J].Data[K]) > 0 then
             begin
-              Details[j].Data.Delete(k);
-              Details[j].Changed := True;
+              Details[J].Data.Delete(K);
+              Details[J].Changed := True;
             end;
           end;
         end;
 
-        // Видалення фізичних папок з /apps
         FoundInApps := False;
-        for j := 0 to High(apps) do
+        for J := 0 to High(AppsEntries) do
         begin
-          if Pos(blacklisted_app, apps[j].Name) > 0 then
+          if Pos(BlacklistedApp, AppsEntries[J].Name) > 0 then
           begin
             FoundInApps := True;
-            AppPath := PATH_APPS + '/' + apps[j].Name;
+            AppPath := PATH_APPS + '/' + AppsEntries[J].Name;
             if qnx6_RmDir(FFS, AppPath, True) then
-              TConsole.WriteLn(Format('"%s" removed from %s', [apps[j].Name, PATH_APPS]))
+              TConsole.WriteLn(Format('[INFO] Removed "%s" from "%s"', [AppsEntries[J].Name, PATH_APPS]))
             else
-              TConsole.WriteLn(Format('Error removing "%s" from %s', [apps[j].Name, PATH_APPS]));
+              TConsole.WriteLn(Format('[ERROR] Failed to remove "%s" from "%s"', [AppsEntries[J].Name, PATH_APPS]));
           end;
         end;
 
         if not FoundInApps then
-          TConsole.WriteLn(Format('"%s" not found in %s', [blacklisted_app, PATH_APPS]));
+          TConsole.WriteLn(Format('[NOTICE] Target "%s" not found in "%s"', [BlacklistedApp, PATH_APPS]));
       end;
 
-      // --- ЗБЕРЕЖЕННЯ ЗМІН В ФС ---
       if RegChanged then
-        SavePPSList(FFS, PATH_REGISTERED_APPS, Registered, ms);
+        SavePPSList(FFS, PATH_REGISTERED_APPS, Registered, MS);
 
-      for j := 0 to High(Details) do
+      for J := 0 to High(Details) do
       begin
-        if Details[j].Changed then
+        if Details[J].Changed then
         begin
-          AppPath := PATH_APP_DETAILS + '/' + Details[j].Name;
+          AppPath := PATH_APP_DETAILS + '/' + Details[J].Name;
 
-          if Details[j].Data.Count = 0 then
+          if Details[J].Data.Count = 0 then
             qnx6_Rm(FFS, AppPath)
           else
-            SavePPSList(FFS, AppPath, Details[j].Data, ms);
+            SavePPSList(FFS, AppPath, Details[J].Data, MS);
         end;
       end;
 
-      TConsole.WriteLn('Application removal process finished successfully.');
+      TConsole.WriteLn('[INFO] Application removal process finished successfully.');
       Result := 0;
     end;
 
   finally
-    for i := 0 to High(Details) do
-      if Details[i].Data <> nil then
-        FreeAndNil(Details[i].Data);
+    for I := 0 to High(Details) do
+      if Details[I].Data <> nil then
+        FreeAndNil(Details[I].Data);
 
-    FreeAndNil(ms);
+    FreeAndNil(MS);
     FreeAndNil(Registered);
     FreeAndNil(BlackList);
   end;
 end;
+
+{ TRmCommand }
 
 constructor TRmCommand.Create(const AName, AHelp, AUsage: string; AFS: TQNX6Fs);
 begin
@@ -857,11 +836,10 @@ begin
   FFS := AFS;
 end;
 
-
 function TRmCommand.Execute(const Args: array of string): integer;
 var
-  i: integer;
-  s: string;
+  I: integer;
+  ArgStr: string;
   Recursive: boolean;
   Targets: TStringList;
   SuccessCount, FailCount: integer;
@@ -871,60 +849,67 @@ begin
 
   if FFS = nil then
   begin
-    TConsole.WriteLn('rm: File system context is not initialized.');
+    TConsole.WriteLn('rm: [ERROR] File system context is not initialized.');
     Exit(1);
   end;
 
   Targets := TStringList.Create;
   try
-    // Парсинг аргументів та прапорців
-    for i := 0 to Length(Args) - 1 do
+    for I := 0 to Length(Args) - 1 do
     begin
-      s := Trim(Args[i]);
-      if s = '' then Continue;
+      ArgStr := Trim(Args[I]);
+      if ArgStr = '' then Continue;
 
-      if (s = '-r') or (s = '-R') or (s = '-rf') or (s = '-fr') then
+      if (ArgStr = '-r') or (ArgStr = '-R') or (ArgStr = '-rf') or (ArgStr = '-fr') then
         Recursive := True
-      else if (Length(s) > 0) and (s[1] <> '-') then
-        Targets.Add(s);
+      else if (Length(ArgStr) > 0) and (ArgStr[1] <> '-') then
+        Targets.Add(ArgStr);
     end;
 
     if Targets.Count = 0 then
     begin
-      TConsole.WriteLn('rm: missing operand');
+      TConsole.WriteLn('rm: [ERROR] Missing operand');
+      TConsole.WriteLn('[USAGE] rm [-r|-R] <file/directory>');
       Exit(1);
     end;
 
     SuccessCount := 0;
     FailCount := 0;
 
-    for i := 0 to Targets.Count - 1 do
+    for I := 0 to Targets.Count - 1 do
     begin
-      s := Targets[i];
+      ArgStr := Targets[I];
 
       if Recursive then
       begin
-        if qnx6_RmDir(FFS, s, True) then
-          Inc(SuccessCount)
+        if qnx6_RmDir(FFS, ArgStr, True) then
+        begin
+          TConsole.WriteLn(Format('rm: [INFO] Removed "%s"', [ArgStr]));
+          Inc(SuccessCount);
+        end
         else
         begin
-          TConsole.WriteLn(Format('rm: cannot remove ''%s'': Failed to remove directory or file', [s]));
+          TConsole.WriteLn(Format('rm: [ERROR] Cannot remove "%s": Directory or file removal failed', [ArgStr]));
           Inc(FailCount);
         end;
       end
       else
       begin
-        if qnx6_Rm(FFS, s) then
-          Inc(SuccessCount)
+        if qnx6_Rm(FFS, ArgStr) then
+        begin
+          TConsole.WriteLn(Format('rm: [INFO] Removed file "%s"', [ArgStr]));
+          Inc(SuccessCount);
+        end
         else
         begin
-          // Спроба видалити як порожній каталог, якщо це не звичайний файл
-          if qnx6_RmDir(FFS, s, False) then
-            Inc(SuccessCount)
+          if qnx6_RmDir(FFS, ArgStr, False) then
+          begin
+            TConsole.WriteLn(Format('rm: [INFO] Removed empty directory "%s"', [ArgStr]));
+            Inc(SuccessCount);
+          end
           else
           begin
-            TConsole.WriteLn(Format('rm: cannot remove ''%s'': No such file or Directory is not empty',
-              [s]));
+            TConsole.WriteLn(Format('rm: [ERROR] Cannot remove "%s": No such file or directory not empty', [ArgStr]));
             Inc(FailCount);
           end;
         end;
@@ -938,6 +923,7 @@ begin
   end;
 end;
 
+{ TAddStringCommand }
 
 constructor TAddStringCommand.Create(const AName, AHelp, AUsage: string; AFS: TQNX6Fs);
 begin
@@ -947,64 +933,60 @@ end;
 
 function TAddStringCommand.Execute(const Args: array of string): integer;
 var
-  ms: TMemoryStream;
-  sl: TStringList;
+  MS: TMemoryStream;
+  SL: TStringList;
   FilePath, NewString: string;
 begin
   Result := -1;
 
   if FFS = nil then
   begin
-    TConsole.WriteLn('Error: File system context is not initialized.');
+    TConsole.WriteLn('[ERROR] File system context is not initialized.');
     Exit;
   end;
 
   if Length(Args) <> 2 then
   begin
-    TConsole.WriteLn('Usage: addstring <file> <string>');
+    TConsole.WriteLn('[ERROR] Invalid argument count.');
+    TConsole.WriteLn('[USAGE] addstring <file> <string>');
     Exit(1);
   end;
 
   FilePath := Path2QNX(Trim(Args[0]));
   NewString := Args[1];
 
-  ms := TMemoryStream.Create;
-  sl := TStringList.Create;
+  MS := TMemoryStream.Create;
+  SL := TStringList.Create;
   try
-    // Спробуємо прочитати файл. Якщо його немає — буде створено новий список.
-    if qnx6_readFile(FFS, FilePath, ms) = 0 then
+    if qnx6_readFile(FFS, FilePath, MS) = 0 then
     begin
-      ms.Position := 0;
-      sl.LoadFromStream(ms);
+      MS.Position := 0;
+      SL.LoadFromStream(MS);
     end;
 
-    // Перевіряємо на наявність дубліката
-    if sl.IndexOf(NewString) <> -1 then
+    if SL.IndexOf(NewString) <> -1 then
     begin
-      TConsole.WriteLn(Format('String "%s" already exists in "%s". Skipping.', [NewString, FilePath]));
+      TConsole.WriteLn(Format('[NOTICE] String "%s" already exists in "%s". Skipping.', [NewString, FilePath]));
       Exit(0);
     end;
 
-    // Додаємо новий рядок
-    sl.Add(NewString);
+    SL.Add(NewString);
 
-    // Підготовлюємо потік для запису
-    ms.Clear;
-    sl.SaveToStream(ms);
-    ms.Position := 0;
+    MS.Clear;
+    SL.SaveToStream(MS);
+    MS.Position := 0;
 
-    // Записуємо оновлений зміст назад у ФС
-    if qnx6_writeFile(FFS, FilePath, ms) = 0 then
+    if qnx6_writeFile(FFS, FilePath, MS) = 0 then
     begin
-      TConsole.WriteLn(Format('"%s" added to "%s"', [NewString, FilePath]));
+      TConsole.WriteLn(Format('[INFO] Added "%s" to "%s"', [NewString, FilePath]));
       Result := 0;
     end
     else
-      TConsole.WriteLn(Format('Error: Failed to write to file "%s"', [FilePath]));
+      TConsole.WriteLn(Format('[ERROR] Failed to write to file "%s"', [FilePath]));
 
   finally
-    FreeAndNil(sl);
-    FreeAndNil(ms);
+    FreeAndNil(SL);
+    FreeAndNil(MS);
   end;
 end;
 
