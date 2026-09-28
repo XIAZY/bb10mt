@@ -347,14 +347,15 @@ begin
         K := RAM.FlashFile(FL[I], Ver);
         if K < 0 then
         begin
-          TConsole.WriteLn('Error flashing file: ' + DisplayName, ccRed);
-          if K = -3 then Break;
+          TConsole.WriteLn(Format('Error flashing file %s (code %d)',
+            [DisplayName, K]), ccRed);
+          Exit(12);
         end;
       end;
 
       TConsole.WriteLn('Rebooting phone...');
       RAM.RebootPhone;
-      TConsole.WriteLn('Flash completed successfully!', ccGreen);
+      TConsole.WriteLn('Flash transfer and completion acknowledged; reboot requested.', ccGreen);
 
     finally
       FreeAndNil(RAM);
