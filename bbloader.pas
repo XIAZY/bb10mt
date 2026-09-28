@@ -89,6 +89,9 @@ begin
   try
     fUSB.Channel2(Cmd, RespCmd, Data);
     Result := (RespCmd = expectedResp);
+    if not Result then
+      TConsole.WriteLn(Format('%s returned unexpected response 0x%.4X (expected 0x%.4X)',
+        [FuncName, RespCmd, expectedResp]), ccRed);
   except
     on E: Exception do
     begin

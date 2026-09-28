@@ -1019,7 +1019,7 @@ begin
         if fPayload.Read(Buff[8], bs) <> integer(bs) then
         begin
           TConsole.WriteLn('Error reading file data', ccRed);
-          Break;
+          Exit(-4);
         end;
 
         if not fBBLdr.SendBlock(Buff) then
@@ -1069,15 +1069,21 @@ begin
     Move(dummy_signature[0], Buff[2], 560);
 
     if not fBBLdr.SendSignature(Buff) then
+    begin
       TConsole.WriteLn('Signature send error', ccRed);
+      Exit(-5);
+    end;
     Sleep(1000);
   finally
     if Assigned(fPayload) then
       fPayload.Free;
   end;
 
-  if Assigned(fBBLdr) then
-    fBBLdr.Complete;
+  if not Assigned(fBBLdr) or not fBBLdr.Complete then
+  begin
+    TConsole.WriteLn('Flash completion failed', ccRed);
+    Exit(-6);
+  end;
   TConsole.WriteLn('Done');
   Result := 0;
 end;
