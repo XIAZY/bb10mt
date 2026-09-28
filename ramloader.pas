@@ -42,7 +42,8 @@ type
     destructor Destroy; override;
     function ConnectToBB(const runLoaderDelay: integer = 1000; verbose: boolean = False): boolean;
     procedure RebootPhone;
-    function FlashFile(fName: string; ver: byte = 2): integer;
+    function FlashFile(fName: string; ver: byte = 2;
+      SignatureFile: string = ''): integer;
     function TryGetDeviceInfoByID(const aID: longword; out aFullInfo: TFullDeviceInfo): boolean;
     procedure ProbeLoaders;
     function IDtoADDR(const ID: cardinal): cardinal;
@@ -922,7 +923,8 @@ begin
   SafeCloseAndFree(fBB);
 end;
 
-function TRamLoader.FlashFile(fName: string; ver: byte = 2): integer;
+function TRamLoader.FlashFile(fName: string; ver: byte = 2;
+  SignatureFile: string = ''): integer;
 var
   fPayload: TStream;
   Buff: TBytes;
@@ -931,6 +933,8 @@ var
   progress: IProgressIndicator;
   iFiles: TStringList;
   isMFCQ: boolean;
+  HasEmbeddedSignature: boolean;
+  SignatureStream: TFileStream;
 begin
   if not FileExists(fName) then
   begin
@@ -943,6 +947,7 @@ begin
     fPayload := TFileStream.Create(fName, fmOpenRead);
 
     isMFCQ := False;
+    HasEmbeddedSignature := False;
     if fPayload.Size >= 4 then
     begin
       if fPayload.Read(MagicVal, SizeOf(MagicVal)) = 4 then
@@ -973,7 +978,8 @@ begin
         if MagicVal = $48584e51 then
         begin
           fPayload.Position := s - 560;
-          if fPayload.Read(dummy_signature[0], 560) <> 560 then
+          HasEmbeddedSignature := fPayload.Read(dummy_signature[0], 560) = 560;
+          if not HasEmbeddedSignature then
             TConsole.WriteLn('Warning: Could not read complete signature', ccYellow);
           s := s - 560;
         end;
@@ -1032,6 +1038,32 @@ begin
     end;
 
     TConsole.WriteLn('Send signature');
+    if not HasEmbeddedSignature then
+    begin
+      if SignatureFile = '' then
+        SignatureFile := GetExeDirectory + 'cap-signature.bin';
+
+      if not FileExists(SignatureFile) then
+      begin
+        TConsole.WriteLn('Signature block not found: ' + SignatureFile, ccRed);
+        Exit(-7);
+      end;
+
+      SignatureStream := TFileStream.Create(SignatureFile,
+        fmOpenRead or fmShareDenyWrite);
+      try
+        if (SignatureStream.Size <> 560) or
+          (SignatureStream.Read(dummy_signature[0], 560) <> 560) then
+        begin
+          TConsole.WriteLn('Signature block must be exactly 560 bytes', ccRed);
+          Exit(-7);
+        end;
+      finally
+        SignatureStream.Free;
+      end;
+      TConsole.WriteLn('Using external signature block: ' + SignatureFile);
+    end;
+
     SetLength(Buff, 560 + 2);
     PWord(@Buff[0])^ := word(560);
     Move(dummy_signature[0], Buff[2], 560);
