@@ -224,7 +224,8 @@ function TFlashCommand.Execute: integer;
 var
   FL: TStringList;
   TmpArray: array of string;
-  InputParam, ListParam, DelayParam, VersParam, LoadersParam: string;
+  InputParam, ListParam, DelayParam, VersParam, LoadersParam,
+  SignatureParam: string;
   I, K, Ver, RunLoaderDelay, Attempts: integer;
   VersList: TStringList;
   Spinner: IProgressIndicator;
@@ -239,6 +240,7 @@ begin
   GetParameterValue('--list', ListParam);
   GetParameterValue('--versions', VersParam);
   GetParameterValue('--loaders', LoadersParam);
+  GetParameterValue('--signature', SignatureParam);
 
   if GetParameterValue('--delay', DelayParam) then
     RunLoaderDelay := StrToIntDef(DelayParam, DEFAULT_LOADER_DELAY)
@@ -344,7 +346,7 @@ begin
           DisplayName := DisplayName.TrimEnd(['!']);
 
         TConsole.WriteLn('Flashing: ' + DisplayName);
-        K := RAM.FlashFile(FL[I], Ver);
+        K := RAM.FlashFile(FL[I], Ver, SignatureParam);
         if K < 0 then
         begin
           TConsole.WriteLn('Error flashing file: ' + DisplayName, ccRed);
@@ -747,6 +749,8 @@ initialization
   Flash.AddPathParameter('-l', '--list', 'input files list');
   Flash.AddArrayParameter('-v', '--versions', 'QCFM version(s)', False, '1,2');
   Flash.AddPathParameter('-r', '--loaders', 'ram-loaders directory', False, 'loaders');
+  Flash.AddPathParameter('-s', '--signature',
+    '560-byte signature block for images without an embedded signature');
   Flash.AddIntegerParameter('-d', '--delay', 'RAM-loader delay', False, '1000');
 
   Loader := TLoaderCommand.Create('loader', 'probe all loaders');
